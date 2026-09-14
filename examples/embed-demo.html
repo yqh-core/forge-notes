@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>宿主站点 —— Forge Notes 嵌入演示</title>
+  <link rel="icon" href="/docs/public/favicon.svg" />
+
+  <style>
+    /* ============================================================
+       这一段是「宿主站点自己的样式」，故意写得有攻击性：
+       通配符、h2、ul、li、code、同样的类名 —— 用来验证
+       Forge Notes 的 Shadow DOM 是否真的做到了样式隔离。
+       如果组件渲染出来没有被这些规则带偏，说明隔离有效。
+       ============================================================ */
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      background: #eef1f5;
+      color: #333;
+    }
+
+    /* 刻意污染：标题变红、列表去符号、code 变色 */
+    h2 { color: crimson; letter-spacing: 2px; }
+    ul { list-style: none; padding-left: 0; }
+    code { color: deeppink; font-size: 20px; }
+    button { border-radius: 0; background: navy; color: white; }
+
+    .site-header {
+      padding: 18px 32px;
+      background: #1e293b;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .site-header .brand { font-weight: 700; font-size: 18px; }
+    .site-header nav a { color: #cbd5e1; margin-left: 20px; text-decoration: none; font-size: 14px; }
+
+    .wrap { max-width: 960px; margin: 0 auto; padding: 32px 20px 80px; }
+
+    .notice {
+      padding: 14px 18px;
+      margin-bottom: 24px;
+      background: #fff;
+      border-left: 4px solid #1e293b;
+      border-radius: 6px;
+      font-size: 14px;
+      color: #475569;
+    }
+    .notice b { color: #1e293b; }
+
+    .panel {
+      padding: 28px 32px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+    }
+
+    .panel-label {
+      margin: 0 0 18px;
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #94a3b8;
+    }
+
+    .site-footer {
+      padding: 24px 32px;
+      text-align: center;
+      font-size: 13px;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+
+<body>
+  <header class="site-header">
+    <div class="brand">某个主站</div>
+    <nav>
+      <a href="#">首页</a>
+      <a href="#">产品</a>
+      <a href="#">博客</a>
+      <a href="#">联系我们</a>
+    </nav>
+  </header>
+
+  <div class="wrap">
+    <div class="notice">
+      <b>验证要点：</b>下面的博客由 <code>&lt;forge-notes&gt;</code> 自定义元素渲染。
+      本页面的全局样式故意把 <code>h2</code> 设为红色、<code>code</code> 设为粉色大字号、
+      <code>ul</code> 去掉列表符号 —— 因为组件运行在 Shadow DOM 中，
+      这些规则<b>不应该</b>影响到组件内部。
+    </div>
+
+    <!-- 对照组：这个 h2 会被本页全局规则染成红色。
+         下面组件内部的标题若也被染红，说明样式隔离失效。 -->
+    <h2>宿主站点的标题（会被全局 h2 规则染成红色）</h2>
+
+    <div class="panel">
+      <p class="panel-label">嵌入的博客模块</p>
+
+      <!-- 就这一行，博客就进来了 -->
+      <forge-notes theme="auto"></forge-notes>
+    </div>
+  </div>
+
+  <footer class="site-footer">宿主站点页脚 · 与 Forge Notes 无关</footer>
+
+  <script type="module">
+    import { defineForgeNotesElement } from '/packages/embed/dist/forge-notes.js'
+
+    // 注册 <forge-notes>。内部使用 Shadow DOM 隔离样式。
+    defineForgeNotesElement()
+
+    // 暴露到 window 方便在控制台做验证
+    window.__fnReady = true
+  </script>
+</body>
+</html>

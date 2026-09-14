@@ -1,0 +1,33 @@
+# ============================================================
+# 行尾与二进制属性 —— 保证「本机」与「CI（Cloudflare Pages）」行为一致
+#
+# 为什么必须有这个文件：
+#   Windows 开发机常设 core.autocrlf=true，此时仓库内存 LF、Linux 检出为 LF，
+#   看起来「是对的」，但换个没设 autocrlf 的协作者就破了。
+#   显式声明才是保障。Cloudflare Pages 的构建机是 Linux，检出必须拿到 LF。
+# ============================================================
+
+# 默认：由 git 自行判定文本文件并归一化为 LF
+* text=auto
+
+# ---- 二进制资源：禁止任何行尾转换（转换会直接损坏文件）----
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.zip   binary
+
+# ---- 行尾有语义的文件：钉死 LF ----
+# .nvmrc 若带尾随 \r，nvm 会去找名为 "22.22.2\r" 的版本并报找不到版本
+.nvmrc           text eol=lf
+# Shell 脚本带 \r 会在 Linux 上以 "bad interpreter: /usr/bin/env bash^M" 失败
+*.sh             text eol=lf
+# GitHub Actions / 部署规则文件同理
+*.yml            text eol=lf
+*.yaml           text eol=lf
+_headers         text eol=lf
+_redirects       text eol=lf

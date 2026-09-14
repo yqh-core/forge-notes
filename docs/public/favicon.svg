@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Forge Notes">
+  <defs>
+    <linearGradient id="fn-fav" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff8a4c"/>
+      <stop offset="1" stop-color="#d93b1f"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#1c1c22"/>
+  <!-- 简化铁砧 -->
+  <path d="M14 26h34a4 4 0 0 1 4 4v4H14a4 4 0 0 1-4-4v0a4 4 0 0 1 4-4z" fill="url(#fn-fav)"/>
+  <path d="M25 34h14l-2.5 9h-9z" fill="url(#fn-fav)"/>
+  <path d="M18 43h28a4 4 0 0 1 4 4v3H14v-3a4 4 0 0 1 4-4z" fill="url(#fn-fav)"/>
+  <!-- 火花 -->
+  <circle cx="32" cy="15" r="3.2" fill="#ffd166"/>
+  <circle cx="23" cy="20" r="1.9" fill="#ffd166"/>
+  <circle cx="41" cy="20" r="1.9" fill="#ffd166"/>
+</svg>

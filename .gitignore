@@ -1,0 +1,27 @@
+# 依赖
+node_modules
+
+# 编辑器 / 系统
+.DS_Store
+.idea
+*.local
+
+# 构建产物（不应入库）
+docs/.vitepress/dist
+docs/.vitepress/cache
+docs/.vitepress/.temp
+.vitepress/cache
+.vitepress/.temp
+packages/embed/dist
+
+# 由 scripts/build-embed-content.mjs 生成的中间产物
+packages/embed/src/content.generated.json
+
+# 验证脚本产出的截图与探针构建目录
+.verify
+tools/verify/.out
+
+# 日志
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*

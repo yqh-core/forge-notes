@@ -1,0 +1,412 @@
+/* ==========================================================================
+   Forge Notes 嵌入式组件样式
+   - 全部选择器带 .fn- 前缀：命令式挂载时不会污染宿主站点样式
+   - Shadow DOM 模式下天然隔离
+   - 宿主站点可通过覆盖 CSS 变量换肤，无需改组件内部样式
+   ========================================================================== */
+
+.fn-root {
+  /* ---- 主题变量：宿主可覆盖 ---- */
+  --fn-accent: #d93b1f;
+  --fn-accent-hover: #b83018;
+  --fn-accent-soft: rgba(217, 59, 31, 0.08);
+  --fn-bg: #ffffff;
+  --fn-surface: #f7f7f8;
+  --fn-surface-hover: #f1f1f3;
+  --fn-border: #e6e6ea;
+  --fn-text: #1f2328;
+  --fn-text-soft: #6b7280;
+  --fn-radius: 12px;
+  --fn-radius-sm: 6px;
+
+  box-sizing: border-box;
+  color: var(--fn-text);
+  background: var(--fn-bg);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-size: 16px;
+  line-height: 1.75;
+  text-align: left;
+  -webkit-font-smoothing: antialiased;
+}
+
+.fn-root *,
+.fn-root *::before,
+.fn-root *::after {
+  box-sizing: border-box;
+}
+
+/* 跟随系统暗色；宿主也可用 .fn-theme-dark / .fn-theme-light 强制指定 */
+@media (prefers-color-scheme: dark) {
+  .fn-root:not(.fn-theme-light) {
+    --fn-accent: #ff7a45;
+    --fn-accent-hover: #ff9466;
+    --fn-accent-soft: rgba(255, 122, 69, 0.14);
+    --fn-bg: #16161a;
+    --fn-surface: #1e1e24;
+    --fn-surface-hover: #26262e;
+    --fn-border: #2e2e36;
+    --fn-text: #e8e8ec;
+    --fn-text-soft: #9ca3af;
+  }
+}
+
+.fn-root.fn-theme-dark {
+  --fn-accent: #ff7a45;
+  --fn-accent-hover: #ff9466;
+  --fn-accent-soft: rgba(255, 122, 69, 0.14);
+  --fn-bg: #16161a;
+  --fn-surface: #1e1e24;
+  --fn-surface-hover: #26262e;
+  --fn-border: #2e2e36;
+  --fn-text: #e8e8ec;
+  --fn-text-soft: #9ca3af;
+}
+
+/* ============================ 列表视图 ============================ */
+
+.fn-header {
+  margin-bottom: 24px;
+}
+
+.fn-list-title {
+  margin: 0 0 6px;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--fn-text);
+}
+
+.fn-list-desc {
+  margin: 0 0 16px;
+  color: var(--fn-text-soft);
+  font-size: 15px;
+}
+
+.fn-search {
+  width: 100%;
+  max-width: 420px;
+  padding: 9px 14px;
+  margin-bottom: 14px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--fn-text);
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-sm);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.fn-search:focus {
+  border-color: var(--fn-accent);
+}
+
+.fn-search::placeholder {
+  color: var(--fn-text-soft);
+}
+
+.fn-tagbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.fn-chip {
+  padding: 4px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--fn-text-soft);
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fn-chip:hover {
+  background: var(--fn-surface-hover);
+  color: var(--fn-text);
+}
+
+.fn-chip-on {
+  color: #fff;
+  background: var(--fn-accent);
+  border-color: var(--fn-accent);
+}
+
+/* 「+N」展开/收起按钮：用虚线边和强调色与普通标签区分 */
+.fn-chip-more {
+  color: var(--fn-accent);
+  border-style: dashed;
+}
+
+.fn-cards {
+  display: grid;
+  gap: var(--fn-gap, 16px);
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+}
+
+.fn-card {
+  padding: 18px 20px;
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.fn-card:hover {
+  border-color: var(--fn-accent);
+  transform: translateY(-2px);
+}
+
+.fn-card-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--fn-text);
+}
+
+.fn-card:hover .fn-card-title {
+  color: var(--fn-accent);
+}
+
+.fn-card-excerpt {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: var(--fn-text-soft);
+}
+
+.fn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fn-text-soft);
+}
+
+.fn-tag {
+  padding: 1px 9px;
+  font-size: 12px;
+  color: var(--fn-accent);
+  background: var(--fn-accent-soft);
+  border-radius: 999px;
+}
+
+.fn-empty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--fn-text-soft);
+}
+
+.fn-more {
+  display: block;
+  width: 100%;
+  padding: 11px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--fn-text);
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fn-more:hover {
+  border-color: var(--fn-accent);
+  color: var(--fn-accent);
+}
+
+/* ============================ 详情视图 ============================ */
+
+.fn-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  margin-bottom: 22px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--fn-text-soft);
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fn-back:hover {
+  color: var(--fn-accent);
+  border-color: var(--fn-accent);
+}
+
+.fn-post-title {
+  margin: 0 0 12px;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--fn-text);
+}
+
+.fn-post > .fn-meta {
+  margin-bottom: 28px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--fn-border);
+}
+
+/* ---------------------- 文章正文排版 ---------------------- */
+
+.fn-content {
+  font-size: 16px;
+  line-height: 1.85;
+  color: var(--fn-text);
+  word-wrap: break-word;
+}
+
+.fn-content > *:first-child {
+  margin-top: 0;
+}
+
+.fn-content h2 {
+  margin: 34px 0 14px;
+  padding-bottom: 8px;
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1.4;
+  border-bottom: 1px solid var(--fn-border);
+}
+
+.fn-content h3 {
+  margin: 26px 0 12px;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.fn-content h4 {
+  margin: 20px 0 10px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.fn-content p {
+  margin: 0 0 15px;
+}
+
+.fn-content a {
+  color: var(--fn-accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--fn-accent-soft);
+}
+
+.fn-content a:hover {
+  border-bottom-color: var(--fn-accent);
+}
+
+.fn-content ul,
+.fn-content ol {
+  margin: 0 0 15px;
+  padding-left: 24px;
+}
+
+.fn-content li {
+  margin-bottom: 6px;
+}
+
+.fn-content blockquote {
+  margin: 0 0 15px;
+  padding: 10px 16px;
+  color: var(--fn-text-soft);
+  background: var(--fn-surface);
+  border-left: 3px solid var(--fn-accent);
+  border-radius: 0 var(--fn-radius-sm) var(--fn-radius-sm) 0;
+}
+
+.fn-content hr {
+  margin: 28px 0;
+  border: 0;
+  border-top: 1px solid var(--fn-border);
+}
+
+.fn-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--fn-radius-sm);
+}
+
+/* 行内代码 */
+.fn-content code {
+  padding: 2px 6px;
+  font-size: 0.88em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  color: var(--fn-accent);
+  background: var(--fn-accent-soft);
+  border-radius: 4px;
+}
+
+/* 代码块。注意：嵌入版不做语法高亮（体积与依赖考量），
+   需要高亮效果请使用独立部署的 VitePress 站点。 */
+.fn-content pre {
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  overflow-x: auto;
+  font-size: 13.5px;
+  line-height: 1.65;
+  background: #1c1c22;
+  border-radius: var(--fn-radius-sm);
+}
+
+.fn-content pre code {
+  padding: 0;
+  font-size: inherit;
+  color: #e8e8ec;
+  background: none;
+  border-radius: 0;
+}
+
+.fn-content table {
+  width: 100%;
+  margin: 0 0 18px;
+  font-size: 14.5px;
+  border-collapse: collapse;
+}
+
+.fn-content th,
+.fn-content td {
+  padding: 9px 13px;
+  text-align: left;
+  border: 1px solid var(--fn-border);
+}
+
+.fn-content th {
+  font-weight: 600;
+  background: var(--fn-surface);
+}
+
+/* ============================ 响应式 ============================ */
+
+@media (max-width: 640px) {
+  .fn-list-title {
+    font-size: 22px;
+  }
+  .fn-post-title {
+    font-size: 22px;
+  }
+  .fn-card {
+    padding: 15px 16px;
+  }
+  .fn-content h2 {
+    font-size: 19px;
+  }
+  .fn-content pre {
+    font-size: 12.5px;
+    padding: 13px 14px;
+  }
+}
