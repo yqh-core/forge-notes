@@ -283,9 +283,58 @@ export default defineConfig({
   // 只有在显式指定时才覆盖 VitePress 的默认输出目录
   ...(outDir && { outDir }),
 
+  /**
+   * markdown 渲染期的本地化 —— 走官方入口，不做构建后字符串替换。
+   *
+   * 这两条在**渲染期**生效，所以静态 HTML 与页面 chunk JS（SPA 跳转时注入的
+   * 那份 HTML）会同时正确，天然没有 hydration 覆盖问题。
+   */
   markdown: {
     lineNumbers: true,
     theme: 'material-theme-palenight',
+
+    // 代码块的复制按钮。悬停提示由渲染器写死为 "Copy Code"，
+    // 没有 themeConfig 键，但渲染器直接读 `markdown.codeCopyButtonTitle`。
+    codeCopyButtonTitle: site.ui.markdown.codeCopyButtonTitle,
+
+    /**
+     * 标题锚点的 aria-label。
+     *
+     * VitePress 自己的 anchor 插件把 `Permalink to “标题”` 写死在渲染函数里
+     * （createMarkdownRenderer 内联定义，没有任何配置键可改）。只能接管
+     * `link_open` 渲染规则，把 token 上的 aria-label 属性换掉。
+     *
+     * ⚠️ 必须挂在 `config` 而**不是** `preConfig` —— 这里踩过一次，记下来：
+     *   createMarkdownRenderer() 的调用顺序是
+     *     await options.preConfig(md)   // 最早
+     *     … 注册 componentPlugin / linkPlugin / anchorPlugin / … // 中间
+     *     await options.config(md)      // 最后，紧挨 return md
+     *   而 `md.renderer.rules.link_open` 在整条链上**只有一处赋值**：
+     *     linkPlugin 里的 `md.renderer.rules.link_open = (…) => {…}`
+     *   —— 是**直接赋值**，不是与前一版链式组合。所以写在 preConfig 里
+     *   会被 linkPlugin 原样覆盖，**静默失效**（构建照样成功、产物里
+     *   `Permalink to` 一个不少）。实测：preConfig 492 处残留，
+     *   config 0 处。
+     *
+     * 因为 linkPlugin 的规则要处理站内/站外链接的 target/rel，不能丢弃，
+     * 这里用 `prev = md.renderer.rules.link_open` 链式包一层，只改
+     * `header-anchor` 那一个 token，其余原样交给 prev。
+     */
+    config(md) {
+      const template = site.ui.markdown.permalinkLabel
+      const fallback = (tokens, idx, options, env, self) => self.renderToken(tokens, idx, options)
+      const prev = md.renderer.rules.link_open || fallback
+      md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+        const token = tokens[idx]
+        if (token.attrGet('class') === 'header-anchor') {
+          const label = token.attrGet('aria-label')
+          // 原文形态固定为 `Permalink to “<title>”`，取引号之间的标题
+          const m = label && /^Permalink to \u201C([\s\S]*)\u201D$/.exec(label)
+          if (m) token.attrSet('aria-label', template.replace('{title}', m[1]))
+        }
+        return prev(tokens, idx, options, env, self)
+      }
+    },
   },
 
   transformPageData(pageData) {

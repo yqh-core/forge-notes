@@ -96,7 +96,9 @@ export const site = {
   // ==================== 社交链接 ====================
   /** 留空数组即隐藏社交图标区 */
   socialLinks: [
-    { icon: 'github', link: 'https://github.com/yqh-core' },
+    // 不写 ariaLabel 时，主题会把**图标名**（小写 `github`）直接当成无障碍名称。
+    // 图标名是内部标识，不该读给用户听，所以显式给一个正常写法。
+    { icon: 'github', link: 'https://github.com/yqh-core', ariaLabel: 'GitHub' },
   ],
 
   // ==================== 页脚 ====================
@@ -130,12 +132,15 @@ export const site = {
     skipToContent: '跳到正文',
 
     /**
-     * 主题里写死、无配置键可改的 aria 文案。
+     * 主题里写死、无配置键可改、**必须靠构建后替换**的 aria 文案。
      *
-     * 这三条是 `visually-hidden` 的，普通访客看不见，但读屏用户会听到 ——
-     * 不换的话，中文站点会读出 "Main Navigation" / "toggle section"。
+     * 这几条都是屏幕阅读器专用（`visually-hidden` 或 aria-label），普通访客看不见，
+     * 但读屏用户会听到 —— 不换的话，中文站点会读出 "Main Navigation" / "Pager"。
      * 键名对应 scripts/localize-theme-aria.mjs 里的替换表；值写**裸文案**，
      * 引号由脚本按 HTML / JS 两种上下文各自补。
+     *
+     * ⚠️ 这里只放**真的没有官方配置键**的。能走官方配置的一律不要放进来 ——
+     * 见下面 `markdown` 块（那是首选路径，字符串手术是最后手段）。
      */
     hardcodedAria: {
       /** VPNavBarMenu.vue：<nav aria-labelledby> 指向的隐藏标题 */
@@ -146,6 +151,10 @@ export const site = {
       docFooter: '翻页导航',
       /** VPSidebarItem.vue：可折叠分组的 caret 按钮 aria-label */
       toggleSection: '展开或收起分组',
+      /** VPNavBarExtra.vue：右上角「…」按钮的 aria-label（原文 "extra navigation"） */
+      extraNav: '更多',
+      /** VPNavBarHamburger.vue：移动端汉堡菜单按钮的 aria-label（原文 "mobile navigation"） */
+      mobileNav: '移动端导航',
     },
 
     /**
@@ -157,6 +166,31 @@ export const site = {
      * 同样没有配置键可改，由 scripts/localize-theme-aria.mjs 在构建后替换。
      */
     lastUpdatedSeparator: '：',
+
+    /**
+     * markdown 渲染期文案 —— 走**官方配置**，不做构建后替换。
+     *
+     * 这两条比上面那批「幸运」：它们由 VitePress 的 markdown 渲染器在构建期
+     * 生成，而渲染器读的 options 就是 `siteConfig.markdown`，所以有官方入口可改。
+     * 优先用官方入口的理由很实际：渲染期改一次，**静态 HTML 与页面 chunk JS
+     * （SPA 跳转时注入的那份 HTML）会同时正确**，不存在 hydration 覆盖问题，
+     * 也不需要往构建后替换脚本里堆规则。
+     *
+     * `codeCopyButtonTitle` 在 alpha.15 的 `MarkdownOptions` 类型声明里没有，
+     * 属于**内部键**，但运行时是显式读取的（`options.codeCopyButtonTitle || 'Copy Code'`）。
+     * 上游若改名会静默回落成英文 —— 所以 verify-config.sh 与 verify-live.mjs
+     * 都对它做了断言，改名会立刻变红。
+     *
+     * `permalinkLabel` 走 `preConfig`（官方钩子，声明为
+     * "Setup markdown-it instance before applying plugins"）。VitePress 自己的
+     * anchor 插件把 `Permalink to “标题”` 这个 aria-label 写死在渲染函数里，
+     * 没有任何配置键；只能接管 `link_open` 渲染规则改写属性。
+     * 用 `{title}` 占位，其他语言换模板时不用改代码。
+     */
+    markdown: {
+      codeCopyButtonTitle: '复制代码',
+      permalinkLabel: '“{title}”的固定链接',
+    },
 
     /**
      * 本地搜索（minisearch）的按钮与弹窗文案。

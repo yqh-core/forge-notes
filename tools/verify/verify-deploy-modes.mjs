@@ -302,7 +302,13 @@ async function startBrowser() {
 }
 
 async function main() {
-  fs.rmSync(OUT_ROOT, { recursive: true, force: true })
+  // 清理上一轮产物：best-effort。沙箱对「单轮批量删除」有阈值保护，
+  // 产物累积多了会被拦下；清理失败不该让整轮验证崩掉（verify.js 踩过这个坑）。
+  try {
+    fs.rmSync(OUT_ROOT, { recursive: true, force: true })
+  } catch (e) {
+    console.warn(`⚠️  清理 ${OUT_ROOT} 失败（不影响本轮验证）：${e.message}`)
+  }
   fs.mkdirSync(OUT_ROOT, { recursive: true })
 
   await startBrowser()

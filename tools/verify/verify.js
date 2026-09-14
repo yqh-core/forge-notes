@@ -229,8 +229,33 @@ async function main() {
     process.exit(1)
   }
 
-  fs.rmSync(OUT_DIR, { recursive: true, force: true })
+  /*
+   * 清理上一轮的截图。
+   *
+   * 两个刻意的设计，都是被本机环境逼出来的：
+   *
+   * 1) **只删自己产出的文件**（`r{n}-*.png`），不再整个递归删 OUT_DIR。
+   *    别人往这个目录放过东西（线上验收脚本的 html/js 快照、手工下载的基线）
+   *    不该被顺手清掉。
+   *
+   * 2) **best-effort**：清理失败只告警，绝不让整轮验证崩掉。
+   *    实测踩过：沙箱对「单轮批量删除」有阈值（>50 个）保护，目录里累积的
+   *    文件一多，第 232 行这个 rmSync 直接抛 SAFE_DELETE_BULK_CONFIRM_REQUIRED，
+   *    于是一条断言都没跑就退出 —— 清理失败和验证失败是两件完全不同的事，
+   *    不该共用一个退出码。
+   */
   fs.mkdirSync(OUT_DIR, { recursive: true })
+  let cleaned = 0
+  try {
+    for (const f of fs.readdirSync(OUT_DIR)) {
+      if (!/^r\d+-[a-z0-9-]+\.png$/i.test(f)) continue
+      fs.rmSync(path.join(OUT_DIR, f), { force: true })
+      cleaned += 1
+    }
+  } catch (e) {
+    console.warn(`⚠️  清理上一轮截图失败（不影响本轮验证）：${e.message}`)
+  }
+  if (cleaned) console.log(`已清理上一轮截图 ${cleaned} 张`)
 
   const chromePath = findChrome()
   if (!chromePath) {
@@ -594,6 +619,46 @@ async function main() {
       check('翻页导航 aria-labelledby 仍指向存在的 id', pagerHtml.ok, pagerHtml.why)
 
       /*
+       * 标题锚点的 aria-label 与代码块的复制按钮。
+       *
+       * 这两条跟上面几处「构建后字符串替换」不同 —— 它们走**构建期渲染**
+       * （markdown.config 改写 link_open 规则 / markdown.codeCopyButtonTitle），
+       * 所以静态 HTML 与页面 chunk JS 天然一致，不存在 hydration 覆盖。
+       *
+       * 但这里仍然要验，而且必须验：它们最初是**静默失效**的 ——
+       * 钩子挂在 `preConfig`（在所有插件之前），而 linkPlugin 是**直接赋值**
+       * `md.renderer.rules.link_open`，把 preConfig 的改动原样覆盖，构建照样
+       * 成功、产物里 `Permalink to` 一处不少、没有任何警告。
+       * 详见 docs/.vitepress/config.mjs 里那段注释。
+       */
+      const permalink = await evaluate(
+        cdp,
+        `(() => {
+          const a = document.querySelector('.VPDoc .header-anchor')
+          return { found: !!a, label: a ? a.getAttribute('aria-label') || '' : '' }
+        })()`,
+      )
+      check(
+        '标题锚点 aria-label 已本地化（hydration 后）',
+        permalink.found && /固定链接$/.test(permalink.label) && !/Permalink to/.test(permalink.label),
+        permalink.found ? `"${permalink.label}"` : '未找到 .VPDoc .header-anchor',
+      )
+
+      // 社交链接：不配 ariaLabel 时主题会把图标名（小写 github）当无障碍名称读出来
+      const socialAria = await evaluate(
+        cdp,
+        `(() => {
+          const a = document.querySelector('.VPSocialLink')
+          return { found: !!a, label: a ? a.getAttribute('aria-label') || '' : '' }
+        })()`,
+      )
+      check(
+        '社交链接 aria-label 不是图标名（github → GitHub）',
+        socialAria.found && socialAria.label === 'GitHub',
+        socialAria.found ? `"${socialAria.label}"` : '未找到 .VPSocialLink',
+      )
+
+      /*
        * 「最后更新于」必须等于**文章自己 front matter 里的 date**。
        *
        * 这条断言是钉住一个只在线上暴露的 bug：VitePress 用一次
@@ -651,6 +716,47 @@ async function main() {
 
       await cdp.send('Page.captureScreenshot', { format: 'png' })
         .then((s) => fs.writeFileSync(path.join(OUT_DIR, `r${round}-l1-post.png`), Buffer.from(s.data, 'base64')))
+
+      /*
+       * 代码块复制按钮。
+       *
+       * 这一步**必须换一篇文章**：复制按钮只在有代码块的页面上渲染，而 L1-3 用的
+       * welcome 页实测 0 个代码块（`Read the docs` 那种纯说明页）—— 第一版把断言
+       * 写在这里，3 轮全红、报「未找到 button.copy」，而产物其实完全正确。
+       *
+       * 所以改成从产物里**自动挑**第一篇含代码块的文章：加文章、改内容、甚至
+       * welcome 被删掉，这条断言都不会因此假失败。
+       * 一条「只在正好选中某篇文章时才成立」的断言等于没断言。
+       *
+       * 位置也刻意放在 L1-3 的最后 —— 后面几条断言（最后更新于 / 日期来源）
+       * 都依赖当前停在 welcome 页，先跳走会把它们全部带偏。
+       */
+      const postsHtmlDir = path.join(SITE_DIR, 'posts')
+      const codePostFile = fs.existsSync(postsHtmlDir)
+        ? fs.readdirSync(postsHtmlDir).find(
+            (f) => /\.html$/.test(f) && /class="copy"/.test(fs.readFileSync(path.join(postsHtmlDir, f), 'utf8')),
+          )
+        : null
+      if (!codePostFile) {
+        check('产物里存在带代码块的文章页', false, '全部 posts/*.html 都没有 class="copy" —— 复制按钮无处可验')
+      } else {
+        await cdp.send('Page.navigate', { url: `${BASE_SITE}/posts/${codePostFile}` })
+        await waitReady(cdp)
+        await sleep(1000)
+        const copyBtn = await evaluate(
+          cdp,
+          `(() => {
+            const all = document.querySelectorAll('button.copy')
+            const b = all[0]
+            return { found: !!b, n: all.length, title: b ? b.getAttribute('title') || '' : '' }
+          })()`,
+        )
+        check(
+          `代码块复制按钮提示已本地化（hydration 后，${codePostFile} 共 ${copyBtn.n} 个）`,
+          copyBtn.found && copyBtn.title === '复制代码',
+          copyBtn.found ? `title="${copyBtn.title}"` : '未找到 button.copy',
+        )
+      }
 
       /* ---------------- L1-4 关于页 ---------------- */
       console.log('\n[L1] 关于页')

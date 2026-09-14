@@ -11,10 +11,25 @@
  *   VPSidebar.vue               <span id="sidebar-aria-label">Sidebar Navigation</span>
  *   VPDocFooter.vue             <span id="doc-footer-aria-label">Pager</span>
  *   VPSidebarItem.vue           <div role="button" aria-label="toggle section">
+ *   VPNavBarExtra.vue           <button aria-label="extra navigation">（右上角「…」）
+ *   VPNavBarHamburger.vue       <button aria-label="mobile navigation">（移动端汉堡）
  *   VPDocFooterLastUpdated.vue  「最后更新于⟨半角冒号⟩」中间那个分隔符（纯排版，不是英文残留）
  *
- * 前四条都是 `visually-hidden` 的：普通访客看不见，但**读屏用户会听到**。
- * 中文站点读出 "Main Navigation" / "Pager" 是真实的无障碍缺陷，不是洁癖。
+ * 除最后一条（分隔符，属排版）外，其余六条都是**读屏专用**：普通访客看不见，
+ * 但读屏用户会听到。中文站点读出 "Main Navigation" / "Pager" 是真实的无障碍缺陷，不是洁癖。
+ *
+ * ── 什么时候**不该**用这个脚本（重要）──────────────────────────────
+ * 字符串手术是**最后手段**。能走官方配置的一律走官方配置，理由不只是「更干净」：
+ * 本脚本在**产物落盘之后**才动手，而渲染期配置（`markdown.codeCopyButtonTitle` /
+ * `markdown.config`）在渲染时就生效，静态 HTML 与页面 chunk JS 会**同时**正确。
+ * 也就是说：
+ *
+ *   走 markdown 配置（渲染期） → 天然无 hydration 风险，改一次全对
+ *   走本脚本（构建后）         → 必须保证 HTML 与 JS 两侧都命中，否则半成品
+ *
+ * 所以 `Copy Code`（代码块复制按钮）和 `Permalink to “标题”`（标题锚点）
+ * **不在这里**，它们由 docs/.vitepress/config.mjs 的 markdown 配置处理。
+ * 每次想往 RULES 里加规则前先问一句：有没有官方配置键？
  *
  * 既然没有配置开关，就在构建完成后对产物做一次精确替换。
  * 文案仍然取自 site.config.mjs（ui.hardcodedAria），维持「单一配置源」约束 ——
@@ -190,6 +205,42 @@ const RULES = [
     // 只在「分组设了 collapsed 且含子项」时才渲染。本站侧边栏目前没有可折叠组，
     // 所以 HTML 里命中数为 0 是正常的，不能算异常（但 JS 里始终存在这个字面量）。
     required: false,
+  },
+  {
+    key: 'extraNav',
+    label: '右上角「…」按钮（VPFlyout 的 aria-label）',
+    source: 'VPNavBarExtra.vue',
+    chinese: `aria-label="${aria.extraNav}"`,
+    /*
+     * ⚠️ 探针必须**带上下文**，不能用裸中文「更多」——
+     * 实测产物里文章正文本来就出现过 12 次「更多」，
+     * 用裸串判断会让第一次构建就被误判成「已本地化」，
+     * 替换永远不执行且不报错（同 lastUpdatedSeparator 那条的坑）。
+     */
+    probe: /aria-label="更多"/,
+    jsProbe: /label\s*:\s*"更多"/,
+    english: 'extra navigation',
+    htmlMatch: /aria-label="extra navigation"/g,
+    // VPFlyout 是 :aria-label="label"，所以 JS 侧要改的是**传进去的 prop 值**，
+    // 形态 `label:"extra navigation"`（未压缩是 `label: "extra navigation"`）。
+    jsMatch: /label\s*:\s*"extra navigation"/g,
+    jsReplacer: () => `label:"${aria.extraNav}"`,
+    required: true,
+    bothChannels: true,
+  },
+  {
+    key: 'mobileNav',
+    label: '移动端汉堡菜单按钮（aria-label）',
+    source: 'VPNavBarHamburger.vue',
+    chinese: `aria-label="${aria.mobileNav}"`,
+    probe: /aria-label="移动端导航"/,
+    jsProbe: /"aria-label"\s*:\s*"移动端导航"/,
+    english: 'mobile navigation',
+    htmlMatch: /aria-label="mobile navigation"/g,
+    jsMatch: /"aria-label"\s*:\s*"mobile navigation"/g,
+    jsReplacer: () => `"aria-label":"${aria.mobileNav}"`,
+    required: true,
+    bothChannels: true,
   },
 ]
 

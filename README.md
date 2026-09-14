@@ -390,13 +390,42 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
 | 键盘「跳到正文」链接 | `themeConfig.skipToContentLabel` |
 | 上一篇 / 下一篇、本页目录、回到顶部、主题切换、侧栏菜单 | `docFooter` / `outline.label` / `returnToTopLabel` / `darkModeSwitch*` / `sidebarMenuLabel` |
 | 正文日期 | 锁定 UTC + 跟随站点语言（否则 UTC-5 的访客会看到前一天） |
-| **主题里写死的** `Main Navigation` / `Sidebar Navigation` / `Pager` / `toggle section` / 日期分隔符 `": "` | `scripts/localize-theme-aria.mjs`（构建后替换 HTML **和** theme JS，见踩坑 17） |
+| 代码块复制按钮提示 `Copy Code` | `markdown.codeCopyButtonTitle`（**内部键**，不在 `MarkdownOptions` 类型声明里，但渲染器确实直读它 —— 所以配了断言兜底） |
+| 标题锚点 `Permalink to “标题”` | `markdown.config` 里改写 `link_open` 渲染规则（⚠️ **必须 `config`，不能 `preConfig`**，见下方说明） |
+| 社交链接的无障碍名称（默认是图标名 `github`） | `socialLinks[].ariaLabel` |
+| **主题里写死的** `Main Navigation` / `Sidebar Navigation` / `Pager` / `toggle section` / `extra navigation` / `mobile navigation` / 日期分隔符 `": "` | `scripts/localize-theme-aria.mjs`（构建后替换 HTML **和** theme JS，见踩坑 17） |
 
-> 最后一行没有官方开关可用 —— `2.0.0-alpha.15` 的主题产物里根本没有读取
-> `navMenuLabel` / `mobileMenuLabel` / `extraMenuLabel` 这几个官方文档提到的键（实测 grep 确认）。
-> 这几处文案都是 `visually-hidden` 的（普通访客看不见，但读屏用户会听到），
-> 中文站点读出 "Main Navigation" / "Pager" 是真实的无障碍缺陷；日期分隔符那条则纯属排版
-> （整行都是中文，用全角「：」更整齐）。因为都没有配置键，所以用构建后替换补上。
+> **两条路线，验收标准不同。**
+>
+> *构建后替换*（最后一行）没有配置键可用 —— `2.0.0-alpha.15` 的主题产物里根本没有
+> 读取 `navMenuLabel` / `mobileMenuLabel` / `extraMenuLabel` 这几个官方文档提到的键（实测 grep 确认）。
+> 这些文案大多 `visually-hidden`（普通访客看不见，但读屏用户会听到），中文站点读出
+> "Main Navigation" / "Pager" 是真实的无障碍缺陷；日期分隔符那条纯属排版
+> （整行都是中文，用全角「：」更整齐）。**这类必须 HTML 与 theme JS 两侧同时改**，
+> 只改一侧会在 hydration 后被覆盖回英文且不报错（踩坑 17）。
+>
+> *构建期渲染*（`Copy Code` / `Permalink to`）在渲染期就产出了正确文案，
+> 静态 HTML 与页面 chunk JS 天然一致，不存在覆盖问题。**但钩子位置很关键**：
+>
+> ```js
+> // createMarkdownRenderer() 里的真实顺序
+> await options.preConfig(md)   // ← 最早，此时 renderer.rules 还是空的
+> … 注册 linkPlugin / anchorPlugin / …   // ← 中间，linkPlugin 直接赋值 rules.link_open
+> await options.config(md)      // ← 最后，紧挨 return md
+> ```
+>
+> 而 `md.renderer.rules.link_open` 在整条链上**只有一处赋值** —— `linkPlugin` 里的
+> **直接赋值**（不是与前一版链式组合）。所以写在 `preConfig` 里会被它原样覆盖、
+> **静默失效**：构建成功、无警告、产物里 `Permalink to` 一处不少（实测 492 处）。
+> 这就是「本地化看起来做完了、其实没做」的典型形态 —— 所以它现在有断言钉着。
+>
+> **方法：本地化要审计取值分布，不能逐个 bug 打补丁。** 上面 `extra navigation` /
+> `mobile navigation` / `Permalink to` / `Copy Code` 这 4 类，前几轮一条都没被发现，
+> 直到对全部产物做一次 `aria-label` / `title` 的取值统计才暴露出来
+> （分别 ×20 / ×20 / ×492 / ×328，每页都有）。漏掉的那些不会报错，只是安静地留在产物里。
+> 对应的固定措施是 `verify-config.sh` 探针 6.5 的 `scan_absent` / `scan_present`：**全量扫**产物，
+> 而不是只查某一个文件 —— 当初 `Pager` 就是从「只查一个文件」的断言底下溜过去的。
+
 
 嵌入组件（L2）这边：
 
@@ -742,6 +771,59 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
     *教训：环境差异不止「依赖版本」「操作系统」这类显式的，还有**构建期开关**这种隐式的。
     凡是对产物做字符串手术，匹配式就必须对空白／压缩形态免疫（一律 `\s*`）；
     并且验证脚本要把「本次验的是哪种形态」打进日志 —— 把盲区变成看得见的一行。*
+
+21. **本地化钩子挂错阶段，静默失效；而且「按题修」漏掉了一整批。两个问题其实是同一个：没有审计。**
+
+    `markdown.preConfig` 是第一版选择，注释里还写着「位置很关键，preConfig 在插件注册之前跑，
+    所以这里改的规则会被后面注册的插件沿用」—— **恰好说反了**。
+    `createMarkdownRenderer()` 的真实顺序是：
+
+    ```js
+    await options.preConfig(md)   // 最早：此时 renderer.rules.link_open 还不存在
+    … linkPlugin(md, …) / anchorPlugin(md, …) / …   // 中间
+    await options.config(md)      // 最后，紧挨 return md
+    ```
+
+    而 `md.renderer.rules.link_open` 在整条链上**只有一处赋值** —— `linkPlugin` 里那句
+    `md.renderer.rules.link_open = (tokens, idx, …) => {…}`，是**直接赋值**，
+    **不与前一版链式组合**。于是 `preConfig` 里设好的规则被原样丢弃：
+
+    | 钩子 | 产物里 `Permalink to` 残留 |
+    |---|---|
+    | `preConfig` | **492 处**（HTML）/ 493 处（JS） |
+    | `config` | 0 / 0 |
+
+    构建全程成功、**没有任何警告**，产物只是安静地留着英文。修法是改挂 `config`，
+    并用 `prev = md.renderer.rules.link_open` 链式包一层（linkPlugin 那段要处理站内/站外
+    链接的 `target`/`rel`，不能丢）。
+
+    **但真正该记的不是「钩子挂哪」，是「为什么前几轮完全没发现」。** 同一轮里还有 3 类
+    同样每页都出现的写死英文：`extra navigation` ×20、`mobile navigation` ×20、
+    `Copy Code` ×328。它们的共同点是 —— **之前没人去数过产物里到底有哪些取值**。
+    前几轮是「按题修」：只改被指出的那几处，改完看着绿了就收工。
+
+    改法是做一次**取值分布审计**，而不是再补一条正则：
+
+    ```python
+    # 统计全部产物里 aria-label / title 的取值分布
+    for m in re.finditer('aria-label="([^"]{1,60})"', s.replace('\\"', '"')): …
+    # 取值是纯 ASCII 且无中文 → 疑似英文残留，按出现次数排序
+    ```
+
+    一次就扫出上面 4 类（其次序恰好也是「每页都有」到「只在代码块里有」）。
+    修掉之后固定成断言 —— 关键是 `verify-config.sh` 探针 6.5 的 `scan_absent` / `scan_present`
+    是**全量扫**产物，不是只查一个文件。之前的 `assert_fixed_absent` 只指一个文件，
+    所以「只在文章页出现」的 `Pager` 就是这么从断言底下溜过去的。
+
+    *教训一：官方文档写的钩子名不保证语义 —— 要读**调用点**，不要读注释。
+    本轮两处静默失效（`preConfig` 覆盖、`codeCopyButtonTitle` 不在类型声明里）都是这么定性的。*
+
+    *教训二：本地化、i18n、schema 校对这类「逐项列出」的工作，必须先用**统计**找出全集，
+    再逐项修。按题修的漏项率极高，而且漏掉的不会报错 —— 它会一直安静地留在产物里，
+    直到某天有人截图问「这里怎么是英文」。*
+
+    *教训三：一个「只能查一个文件」的断言，覆盖面是假的。凡是「这类东西一个都不该有」
+    的约束，断言就必须是**全域**的。*
 
 ## 关键命令速查
 

@@ -102,6 +102,30 @@ has_fixed() { grep -Fq "$2" "$1" 2>/dev/null; }
 assert_fixed()        { if has_fixed "$1" "$2"; then ok "$3"; else bad "$3  (文件 $1 未含固定串 $2)"; fi; }
 assert_fixed_absent() { if has_fixed "$1" "$2"; then bad "$3  (文件 $1 仍含固定串 $2)"; else ok "$3"; fi; }
 
+# ── 全量扫描版断言 ────────────────────────────────────────────────
+#
+# 为什么需要它们：`assert_fixed_absent` 只查**一个指定文件**。本地化缺陷的
+# 典型形态是「某个字符串只在文章页出现」或「只在某一类布局里出现」，
+# 拿一个文件去断言就必然漏掉 —— 当初 `Pager` 就是这么从断言底下溜过去的。
+# 这两条扫 `$DIST` 下**全部** html + js，任一文件命中即判定。
+#
+# 只用 `grep -F`（固定串）：本环境 grep 的正则里同时出现多字节字符与字符类
+# 会失配（见 assert_re 的说明），而这些断言查的全是含中文/空格的串。
+scan_absent() { # $1=needle $2=标签
+  local hits
+  hits="$(grep -rlF --include='*.html' --include='*.js' -- "$1" "$DIST" 2>/dev/null | head -3)"
+  if [ -n "$hits" ]; then
+    bad "$2  (仍残留「$1」于：$(echo "$hits" | tr '\n' ' '))"
+  else
+    ok "$2"
+  fi
+}
+scan_present() { # $1=needle $2=标签
+  local n
+  n="$(grep -rlF --include='*.html' --include='*.js' -- "$1" "$DIST" 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$n" -gt 0 ]; then ok "$2（$n 个产物文件命中）"; else bad "$2  (全部产物里都没有「$1」)"; fi
+}
+
 has_re() { grep -Eq "$2" "$1" 2>/dev/null; }
 
 # 正则版断言：专治「同一个语义在压缩 / 未压缩产物里字面形态不同」。
@@ -407,7 +431,35 @@ if VITE_SITE_URL=https://example.com build_site p6-meta; then
     bad "未找到文章页产物，无法验证侧栏 / 翻页 / 日期分隔符文案"
   fi
 
-  # ---- 6.5 日期格式化选项 ----
+  # ---- 6.5 主题/渲染器里写死的**其余**英文 ----
+  #
+  # 这一组是「按题修」留下的欠账。前几轮只改了被指出的那 5 处，直到对整个
+  # 产物做一次 `aria-label` / `title` 的**取值分布统计**，才暴露出下面这 4 类
+  # （每页都出现，之前一条断言都没盯）：
+  #   extra navigation ×20 / mobile navigation ×20 / Permalink to ×492 / Copy Code ×328
+  #
+  # 教训：本地化要**审计取值分布**，不能逐个 bug 打补丁。漏掉的那些不会报错，
+  # 只是安静地留在产物里 —— 而验证脚本的盲区就等于产品的盲区。
+  #
+  # 两组实现路径不同，但验收标准相同：HTML 与页面 chunk JS **两侧都必须是中文**，
+  # 否则 hydration 会把静态 HTML 改回英文（踩坑 17）。
+  #
+  #   走构建期渲染（天然两侧一致，无 hydration 风险）
+  #     Permalink to “标题”  → markdown.config 改写 link_open 规则（**不能**用 preConfig，见 config.mjs 注释）
+  #     Copy Code            → 渲染器直读 markdown.codeCopyButtonTitle
+  #   走构建后替换（两条通道都要命中）
+  #     extra navigation     → VPFlyout.vue 的 aria-label
+  #     mobile navigation    → VPNavBarHamburger.vue 的 aria-label
+  scan_absent  'extra navigation'  "产物无 extra navigation 残留"
+  scan_absent  'mobile navigation' "产物无 mobile navigation 残留"
+  scan_absent  'Copy Code'         "产物无 Copy Code 残留"
+  scan_absent  'Permalink to'      "产物无 Permalink to 残留"
+  scan_present '更多'               "产物含「更多」（右上角导航 aria）"
+  scan_present '移动端导航'          "产物含「移动端导航」（汉堡菜单 aria）"
+  scan_present '复制代码'            "产物含「复制代码」（代码块复制按钮）"
+  scan_present '固定链接'            "产物含「固定链接」（标题锚点 aria）"
+
+  # ---- 6.6 日期格式化选项 ----
   # 这个字符串是**浏览器端**用来格式化的，所以这三个选项直接决定访客看到什么：
   #   timeZone 不钉 UTC → UTC-5 的访客会把 2025-11-30 看成 2025-11-29（差一天）
   #   forceLocale 不设 → 英文浏览器的访客在中文页面上看到 "November 30, 2025"

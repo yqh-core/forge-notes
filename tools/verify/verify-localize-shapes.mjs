@@ -67,6 +67,8 @@ const VARIANTS = {
       'const c=v("span",{class:"visually-hidden",id:"doc-footer-aria-label"},"Pager",-1);',
       'const d=v("div",{role:"button","aria-label":"toggle section"});',
       'const e=G(S(i(t).lastUpdated?.text||i(t).lastUpdatedText||"Last updated")+": ",1),v("time",{r:1});',
+      'const f=v(_e,{key:0,class:"VPNavBarExtra",label:"extra navigation"},{default:f(()=>[])});',
+      'const g=u("button",{type:"button",class:T(["VPNavBarHamburger",{active:e.active}]),"aria-label":"mobile navigation","aria-expanded":e.active});',
     ].join('\n'),
   },
   pretty: {
@@ -89,6 +91,19 @@ const VARIANTS = {
       '  "aria-label": "toggle section"',
       '}, null, -1);',
       'const e = createTextVNode(toDisplayString(unref(theme2).lastUpdated?.text || unref(theme2).lastUpdatedText || "Last updated") + ": ", 1);',
+      // 注意这两条的真实形态差异：extraNav 在 JS 侧是 **prop 值** `label:` 而不是
+      // `aria-label`（组件收到 label 后再渲染成 aria-label），mobileNav 才是 aria-label。
+      'const f = createBlock(VPFlyout, {',
+      '  key: 0,',
+      '  class: "VPNavBarExtra",',
+      '  label: "extra navigation"',
+      '}, { default: () => [] });',
+      'const g = createElementBlock("button", {',
+      '  type: "button",',
+      '  class: normalizeClass(["VPNavBarHamburger", { active: __props.active }]),',
+      '  "aria-label": "mobile navigation",',
+      '  "aria-expanded": __props.active',
+      '}, null, -1);',
     ].join('\n'),
   },
 }
@@ -100,6 +115,9 @@ const HTML_FIXTURE = [
   '<span class="visually-hidden" id="doc-footer-aria-label">Pager</span>',
   '<button aria-label="toggle section">分组</button>',
   `<p class="VPLastUpdated">最后更新于: <time datetime="2025-11-30T00:00:00.000Z">2025年11月30日</time></p>`,
+  // HTML 侧两条都是 aria-label（与 JS 侧的 extraNav 是 label: 不同，见上）
+  '<button type="button" class="button" aria-haspopup="true" aria-expanded="false" aria-label="extra navigation" data-v-42cb505d>',
+  '<button type="button" class="VPNavBarHamburger hamburger" aria-label="mobile navigation" aria-expanded="false" aria-controls="VPNavScreen" data-v-70946a35>',
 ].join('\n')
 
 function buildFixture(variant) {
@@ -152,10 +170,14 @@ function run() {
       ['JS 无 Sidebar Navigation 残留', !js.includes('Sidebar Navigation')],
       ['JS 无 Pager 残留', !js.includes('Pager')],
       ['JS 无 toggle section 残留', !js.includes('toggle section')],
+      ['JS 无 extra navigation 残留', !js.includes('extra navigation')],
+      ['JS 无 mobile navigation 残留', !js.includes('mobile navigation')],
       ['JS 无半角分隔符残留（": " 未替换）', !/\+\s*": "\s*,\s*1\)/.test(js)],
       ['JS 已写入主导航', js.includes(aria.mainNav)],
       ['JS 已写入侧边栏导航', js.includes(aria.sidebarNav)],
       ['JS 已写入翻页导航', js.includes(aria.docFooter)],
+      ['JS 已写入更多', js.includes(aria.extraNav)],
+      ['JS 已写入移动端导航', js.includes(aria.mobileNav)],
       [`JS 已写入全角分隔符 ${sep}`, /\+\s*"："/.test(js)],
       ['JS 引号数量未变（防止字符串字面量退化成裸标识符）', (js.match(/"/g) || []).length % 2 === 0],
     ]
@@ -168,6 +190,10 @@ function run() {
       ['HTML 无 Main Navigation 残留', !html.includes('Main Navigation')],
       ['HTML 无 Sidebar Navigation 残留', !html.includes('Sidebar Navigation')],
       ['HTML 无 Pager 残留', !html.includes('Pager')],
+      ['HTML 无 extra navigation 残留', !html.includes('extra navigation')],
+      ['HTML 无 mobile navigation 残留', !html.includes('mobile navigation')],
+      ['HTML 已写入更多（aria-label）', html.includes(`aria-label="${aria.extraNav}"`)],
+      ['HTML 已写入移动端导航（aria-label）', html.includes(`aria-label="${aria.mobileNav}"`)],
       [`HTML 的「最后更新于」分隔符已换为全角 ${sep}`, html.includes(`${sep}<time`)],
       ['HTML 无半角分隔符残留', !/: <time/.test(html)],
     ]
