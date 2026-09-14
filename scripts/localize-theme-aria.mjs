@@ -2,17 +2,19 @@
  * scripts/localize-theme-aria.mjs —— 把主题里**写死的**英文 aria 文案换成中文
  *
  * ── 为什么要这么绕 ────────────────────────────────────────────────
- * VitePress 默认主题有三处英文文案是**字面量写死在组件里**的，`2.0.0-alpha.15`
+ * VitePress 默认主题有几处文案是**字面量写死在组件里**的，`2.0.0-alpha.15`
  * 没有提供任何 themeConfig 开关能改它们（实测 grep 整个 theme-default 目录，
  * `navMenuLabel` / `mobileMenuLabel` / `extraMenuLabel` 这些官方文档提到的键
  * 在本版本的主题产物里根本没有被读取）：
  *
- *   VPNavBarMenu.vue   <span id="main-nav-aria-label">Main Navigation</span>
- *   VPSidebar.vue      <span id="sidebar-aria-label">Sidebar Navigation</span>
- *   VPSidebarItem.vue  <div role="button" aria-label="toggle section">
+ *   VPNavBarMenu.vue            <span id="main-nav-aria-label">Main Navigation</span>
+ *   VPSidebar.vue               <span id="sidebar-aria-label">Sidebar Navigation</span>
+ *   VPDocFooter.vue             <span id="doc-footer-aria-label">Pager</span>
+ *   VPSidebarItem.vue           <div role="button" aria-label="toggle section">
+ *   VPDocFooterLastUpdated.vue  「最后更新于⟨半角冒号⟩」中间那个分隔符（纯排版，不是英文残留）
  *
- * 这三条都是 `visually-hidden` 的：普通访客看不见，但**读屏用户会听到**。
- * 中文站点读出 "Main Navigation" 是真实的无障碍缺陷，不是洁癖。
+ * 前四条都是 `visually-hidden` 的：普通访客看不见，但**读屏用户会听到**。
+ * 中文站点读出 "Main Navigation" / "Pager" 是真实的无障碍缺陷，不是洁癖。
  *
  * 既然没有配置开关，就在构建完成后对产物做一次精确替换。
  * 文案仍然取自 site.config.mjs（ui.hardcodedAria），维持「单一配置源」约束 ——
@@ -29,6 +31,31 @@
  * 也就是说「只改 HTML」的版本在首屏看似正确、**hydration 之后就变回英文**，
  * 而且不会有任何报错。所以两边一起改，让 hydration 前后完全一致。
  *
+ * ── ⚠️ 匹配式必须「形态无关」（这里踩过一个静默失效的坑）──────────
+ * 产物有两种形态，同一个字面量的**空白写法完全不同**：
+ *
+ *   DEBUG=1 构建（验证脚本用它跳过 .temp 清理）→ **不压缩**，跨行缩进：
+ *       id: "doc-footer-aria-label"
+ *                 }, "Pager", -1)),
+ *       … || "Last updated") + ": ", 1),
+ *   普通/线上构建（无 DEBUG）→ 压成一行：
+ *       id:"doc-footer-aria-label"},"Pager",-1)
+ *
+ * 依据是 vitepress 源码里这一行：
+ *   `minify: ssr ? !!config.mpa : options.minify ?? !process.env.DEBUG`
+ * 也就是 **DEBUG 有值就不压缩**。验证脚本为了绕开沙箱的批量删除拦截一直在用
+ * DEBUG=1，于是「验证时跑的产物」和「线上发的产物」形态根本不同。
+ *
+ * 第一版的 JS 匹配式是照着压缩形态写的（`(?<="doc-footer-aria-label"\},)"Pager"`
+ * 要求 `}` 紧跟同行、`\+": ",1\)` 要求没有空格），结果：
+ *   压缩产物 → 正常替换；
+ *   未压缩产物 → **静默不匹配** → HTML 改成中文、JS 还是英文
+ *                → hydration 之后又被改回英文，且全程不报错。
+ * 更糟的是脚本当时只看「这条规则总共命中几处」：HTML 命中了就记成功，
+ * 日志一片绿 —— 半成品被当成完成品。所以现在同时做两件事：
+ *   1. 匹配式一律用 \s* 容忍空白，**不假设压缩与否**；
+ *   2. 每条规则**分通道统计**（HTML / JS），只命中一侧就告警。
+ *
  * ── 为什么不做成 Vite 插件 ────────────────────────────────────────
  * VitePress 的页面落盘发生在 vite build **之后**（它先跑完 rollup 再渲染写盘），
  * 所以插件的 closeBundle 钩子执行时 HTML 还没生成，挂在那里会静默不生效。
@@ -40,6 +67,7 @@
  *   - 英文在、中文不在   → 执行替换
  *   - 中文已在、英文不在 → 已本地化，静默通过（保证脚本可重复执行）
  *   - 两者都不在         → required:true 的规则**告警**；required:false 的只提示
+ *   - 只在 HTML 或只在 JS 命中 → **告警**（半成品，hydration 会把中文覆盖回去）
  * 告警不中断构建：aria 文案是装饰性缺陷，不值得让一次正常部署失败。
  * 真正的把关交给验证脚本 —— tools/verify/verify-config.sh 与 verify.js
  * 都断言了「中文在、英文不在」，且 verify.js 是在**真实浏览器 hydration 之后**
@@ -61,6 +89,7 @@ const outDir = process.env.VITE_OUT_DIR
   : path.join(projectRoot, 'docs/.vitepress/dist')
 
 const aria = site.ui.hardcodedAria
+const sep = site.ui.lastUpdatedSeparator
 
 /**
  * 替换规则：每条同时给出 HTML 形态与 JS 形态的匹配式。
@@ -86,6 +115,7 @@ const RULES = [
     htmlMatch: /(?<=main-nav-aria-label[^>]*>)\s*Main Navigation\s*(?=<\/span>)/g,
     jsMatch: /"\s*Main Navigation\s*"/g,
     required: true,
+    bothChannels: true,
   },
   {
     key: 'sidebarNav',
@@ -97,6 +127,54 @@ const RULES = [
     htmlMatch: /(?<=sidebar-aria-label[^>]*>)\s*Sidebar Navigation\s*(?=<\/span>)/g,
     jsMatch: /"\s*Sidebar Navigation\s*"/g,
     required: true,
+    bothChannels: true,
+  },
+  {
+    key: 'docFooter',
+    label: '翻页导航（上一篇/下一篇 aria-labelledby 目标）',
+    source: 'VPDocFooter.vue',
+    chinese: aria.docFooter,
+    probe: aria.docFooter,
+    english: 'Pager',
+    htmlMatch: /(?<=doc-footer-aria-label[^>]*>)\s*Pager\s*(?=<\/span>)/g,
+    /*
+     * JS：`"Pager"` 是 createBaseVNode 的第三个参数，紧跟在 props 对象后面。
+     * 用 `id:"doc-footer-aria-label"` 卡住位置，避免误伤别处的 "Pager"。
+     *
+     * ⚠️ `\s*` 一个都不能省 —— 未压缩产物在这里是**跨行**的：
+     *      id: "doc-footer-aria-label"
+     *                }, "Pager", -1)),
+     * 去掉 \s* 就只适配压缩形态，未压缩产物上会静默不匹配（踩过，见文件头说明）。
+     */
+    jsMatch: /(?<="doc-footer-aria-label"\s*\}\s*,\s*)"Pager"/g,
+    required: true,
+    bothChannels: true,
+  },
+  {
+    key: 'lastUpdatedSeparator',
+    label: '「最后更新于」的分隔符（排版：半角 → 全角）',
+    source: 'VPDocFooterLastUpdated.vue',
+    chinese: sep,
+    // 探针必须带上下文，不能只写「：」——正文里本来就有全角冒号，
+    // 用裸串判断会让第一次构建就误判成「已本地化」，替换永远不执行且不报错。
+    probe: /：\s*(?=<time)/,
+    jsProbe: /\+"：",1\)/,
+    english: '": "',
+    /*
+     * ⚠️ 这条与前三条不同：它不是「英文残留」，是**排版**。
+     * 换掉的是文本节点与日期之间的分隔符，所以匹配式要卡住位置、不能误伤别处：
+     *   HTML：`: <time` —— 实测全产物 `<time>` 共 17 个，全部紧跟在 `: ` 之后，
+     *         所以这个模式只会命中「最后更新于」这一处。
+     *   JS  ：渲染函数里是 `… || "Last updated") + ": ", 1)`
+     *         —— 压缩形态 `)+": ",1)`、未压缩形态 `) + ": ", 1)`。
+     *         所以 `\s*` 必须同时兜住两种；替换值统一写成压缩形态，语义等价。
+     * 两条都在每次运行时由 verify-config.sh 的断言兜底，上游变了会立刻暴露。
+     */
+    htmlMatch: /:\s*(?=<time)/g,
+    jsMatch: /\+\s*": "\s*,\s*1\)/g,
+    jsReplacer: () => `+"${sep}",1)`,
+    required: true,
+    bothChannels: true,
   },
   {
     key: 'toggleSection',
@@ -145,7 +223,9 @@ function main() {
   const jsFiles = fs.existsSync(assetsDir) ? collect(assetsDir, ['.js']) : []
   const files = [...htmlFiles, ...jsFiles]
 
-  const replaced = new Map(RULES.map((r) => [r.key, { n: 0, files: 0 }]))
+  // 分通道统计：n/files 是合计，html/js 是各自命中数。
+  // 拆开是为了能识别「只改了一侧」的半成品 —— 见文件头「形态无关」那节。
+  const replaced = new Map(RULES.map((r) => [r.key, { n: 0, files: 0, html: 0, js: 0 }]))
   const already = new Map(RULES.map((r) => [r.key, 0]))
 
   for (const file of files) {
@@ -173,10 +253,20 @@ function main() {
           : JSON.stringify(rule.chinese)
         : rule.chinese
 
-      // 中文已就位 → 上次已处理过，跳过（保证脚本可重复执行）。
-      // 探针用**裸中文串**而不是完整替换文本：HTML 侧是 `aria-label="展开或收起分组"`、
-      // JS 侧是 `"aria-label":"展开或收起分组"`，只有裸串对两种形态都成立。
-      if (next.includes(rule.probe)) {
+      /*
+       * 「已经处理过」判定（保证脚本可重复执行）。
+       *
+       * probe 支持字符串与**非全局**正则两种形态：
+       *   - 字符串 `includes`：适合「中文短语」这种基本不会出现在正文里的探针；
+       *   - 正则 `test`：适合**单个字符**的探针。
+       *
+       * 为什么需要正则：分隔符那条规则的探针是「：」—— 而正文里本来就可能有
+       * 全角冒号，一旦用 includes 判断，第一次构建就会被误判成「已本地化」，
+       * 替换**永远不执行**，而且不报错。所以它必须连上下文一起卡住（`：<time`）。
+       */
+      const probe = isJs ? rule.jsProbe ?? rule.probe : rule.probe
+      const done = probe instanceof RegExp ? probe.test(next) : next.includes(probe)
+      if (done) {
         already.set(rule.key, already.get(rule.key) + 1)
         continue
       }
@@ -190,6 +280,7 @@ function main() {
       const s = replaced.get(rule.key)
       s.n += found.length
       s.files += 1
+      s[isJs ? 'js' : 'html'] += found.length
     }
 
     /*
@@ -228,15 +319,35 @@ function main() {
     const s = replaced.get(rule.key)
     const done = already.get(rule.key)
     if (s.n > 0) {
-      console.log(`  ✅ ${rule.label}：替换 ${s.n} 处 / ${s.files} 个文件 → 「${aria[rule.key]}」`)
+      console.log(
+        `  ✅ ${rule.label}：替换 ${s.n} 处 / ${s.files} 个文件 → 「${rule.chinese}」` +
+          `（HTML ${s.html} / JS ${s.js}）`,
+      )
+      /*
+       * 半成品检测：两侧必须都改到。
+       *
+       * 只改 HTML 的产物「首屏看着是对的」—— 静态 HTML 已经是中文了，
+       * 但 hydration 会按 theme JS 里的值把中文覆盖回原文，而且不报错。
+       * 命中了一侧、另一侧 0 处，几乎只能是匹配式不适配当前产物形态
+       * （压缩 vs 未压缩，见文件头）。这种情况必须在构建时就喊出来。
+       */
+      if (rule.bothChannels && (s.html === 0 || s.js === 0)) {
+        warned += 1
+        console.warn(
+          `  ⚠️  ${rule.label}：只替换了 ${s.html > 0 ? 'HTML' : 'JS'} 一侧，另一侧 0 处命中。\n` +
+            '      两侧必须同时改 —— 只改 HTML 会在 hydration 之后被 theme JS 覆盖回原文，且不报错。\n' +
+            '      多半是匹配式只适配了「压缩」或「未压缩」其中一种产物形态\n' +
+            `      （DEBUG=1 构建不压缩、线上构建压缩），请核对「${rule.english}」的两种写法。`,
+        )
+      }
     } else if (done > 0) {
-      console.log(`  ✅ ${rule.label}：已本地化（${done} 个文件命中文案，无需改动）`)
+      console.log(`  ✅ ${rule.label}：已就位（${done} 个文件命中，无需改动）`)
     } else if (rule.required) {
       warned += 1
       console.warn(
         `  ⚠️  ${rule.label}：**没有匹配到**「${rule.english}」。\n` +
-          `      主题源码是 ${rule.source}，上游可能改了文案 —— 请核对后更新本脚本的匹配式。\n` +
-          `      （当前站点上这条 aria 文案会残留英文，读屏用户仍会听到英文。）`,
+          `      主题源码是 ${rule.source}，上游可能改了模板 —— 请核对后更新本脚本的匹配式。\n` +
+          `      （当前站点上这处文案仍会保持英文/半角。）`,
       )
     } else {
       console.log(`  ○  ${rule.label}：HTML 中未出现（该元素在本站不渲染，属正常）`)

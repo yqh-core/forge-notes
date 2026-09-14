@@ -142,9 +142,21 @@ export const site = {
       mainNav: '主导航',
       /** VPSidebar.vue：侧边栏 <nav> 的隐藏标题 */
       sidebarNav: '侧边栏导航',
+      /** VPDocFooter.vue：上一篇/下一篇 <nav aria-labelledby> 指向的隐藏标题（原文 "Pager"） */
+      docFooter: '翻页导航',
       /** VPSidebarItem.vue：可折叠分组的 caret 按钮 aria-label */
       toggleSection: '展开或收起分组',
     },
+
+    /**
+     * 文章页「最后更新于」后面那个分隔符。
+     *
+     * 主题模板里写死的是半角 `": "`（`VPDocFooterLastUpdated.vue` 的
+     * `{{ text }}:` 换行 `<time>`，Vue 把换行压成一个空格）。
+     * 半角冒号在中文排版里不算错，但既然整行都是中文，用全角「：」更整齐 ——
+     * 同样没有配置键可改，由 scripts/localize-theme-aria.mjs 在构建后替换。
+     */
+    lastUpdatedSeparator: '：',
 
     /**
      * 本地搜索（minisearch）的按钮与弹窗文案。

@@ -9,8 +9,9 @@
 #   4. canonical 与 sitemap 是否一致
 #   5. 文章列表页是否真的自动生成（条目数 == 文章目录里的文章数）
 #   6. 日期取数（必须来自文章 date，而不是 git/部署时间）、404 文案、
-#      搜索与无障碍文案是否都已本地化（含主题里**写死**的那几条 aria，
-#      要求 HTML 与 theme JS 两侧同时干净 —— 只改 HTML 会被 hydration 覆盖回去）
+#      搜索与无障碍文案是否都已本地化（含主题里**写死**的那几条：主导航 /
+#      侧边栏导航 / 翻页导航 Pager / 折叠按钮 / 日期分隔符，要求 HTML 与
+#      theme JS 两侧同时干净 —— 只改 HTML 会被 hydration 覆盖回去）
 #
 # 脚本结束时会无条件恢复到默认构建，不会把探针状态留在产物里。
 # 并且注册了 EXIT/INT/TERM 兜底还原：被打断也不会把探针值留在 site.config.mjs。
@@ -39,12 +40,19 @@ set -u
 cd "$(dirname "$0")/../.." || exit 1
 
 ROOT="$(pwd)"
-BAK="$(mktemp)"
 FAIL=0
 LOG=/tmp/fn-config-verify.log
 YEAR="$(date +%Y)"
 RUN_ID="$(date +%s)"
 OUT_BASE="tools/verify/.out"
+
+# 备份放在仓库内的 .out/（已 gitignore），不用 mktemp 的系统临时目录。
+# 原因：本环境的删除拦截层会把 mktemp 返回的 Windows 路径拼成
+# `/d/work/forge-notes/C:/Users/...`，于是收尾的 `rm -f "$BAK"` **必然失败** ——
+# 每次运行都在系统临时目录里漏一个备份文件，日志里还会多出一串 [safe-delete] 报错，
+# 看着像脚本坏了，其实不是。放到仓库内既删得掉，也符合「产物都在 .out/」的约定。
+mkdir -p "$OUT_BASE"
+BAK="$OUT_BASE/site.config.mjs.bak.$$"
 
 cp site.config.mjs "$BAK"
 
@@ -67,7 +75,16 @@ restore_config() {
     rm -f "$BAK"
   fi
 }
-trap restore_config EXIT INT TERM
+trap restore_config EXIT
+# ⚠️ INT/TERM 的处理器里必须**真的退出**。
+# 旧写法是 `trap restore_config EXIT INT TERM` —— 收到 Ctrl-C 后 bash 执行完
+# 处理器会**继续往下跑**（信号处理器默认不终止脚本），于是用户以为停了、
+# 屏幕上却还在「重建站点」，而且后续构建用的还是已还原的配置，
+# 会再冒出一堆莫名其妙的断言失败。还原 + 明确的退出码才是对的。
+# （退出码按惯例：SIGINT→130、SIGTERM→143。EXIT 处理器随即再跑一次
+#   restore_config，但 BAK 已被删除，是 no-op。）
+trap 'restore_config; exit 130' INT
+trap 'restore_config; exit 143' TERM
 
 say() { printf '\n### %s\n' "$1"; }
 ok()  { printf '  [PASS] %s\n' "$1"; }
@@ -84,6 +101,25 @@ has_fixed() { grep -Fq "$2" "$1" 2>/dev/null; }
 # 用正则很容易被转义规则绕进去，所以按固定字符串匹配。
 assert_fixed()        { if has_fixed "$1" "$2"; then ok "$3"; else bad "$3  (文件 $1 未含固定串 $2)"; fi; }
 assert_fixed_absent() { if has_fixed "$1" "$2"; then bad "$3  (文件 $1 仍含固定串 $2)"; else ok "$3"; fi; }
+
+has_re() { grep -Eq "$2" "$1" 2>/dev/null; }
+
+# 正则版断言：专治「同一个语义在压缩 / 未压缩产物里字面形态不同」。
+#
+# 固定串断言在这种场景下会**假绿**，这是实测踩到的：未压缩产物里分隔符是
+# `) + ": ", 1)`（有空格），拿固定串 `+": ",1)`（无空格）去断言「不残留半角冒号」
+# 必然通过 —— 而它其实根本没被替换。验证脚本当时就是这么把 theme JS 里
+# 未替换的 Pager / 半角冒号放过去的。
+#
+# ⚠️⚠️ 只用于**纯 ASCII** 的模式！本环境的 grep（msys2）在正则里同时出现
+#   **多字节字符**与**字符类**时会失配，实测：
+#     grep -Ec '\+[[:space:]]*"：[[:space:]]*,[[:space:]]*1\)'  → 0（明明有）
+#     grep -Ec '\+[[:space:]]*": "[[:space:]]*,[[:space:]]*1\)' → 1（正确）
+#   两种 locale（C.UTF-8 / LC_ALL=C）都一样，与 locale 无关。
+#   所以：**带中文或全角的断言一律用 assert_fixed / assert_fixed_absent**
+#   （grep -F，字节级比较，没有这个问题）；正则只留给 ASCII 模式。
+assert_re()        { if has_re "$1" "$2"; then ok "$3"; else bad "$3  (文件 $1 未匹配正则 /$2/)"; fi; }
+assert_re_absent() { if has_re "$1" "$2"; then bad "$3  (文件 $1 仍匹配正则 /$2/)"; else ok "$3"; fi; }
 
 # 构建站点到本轮的探针目录。$1 = 探针名；其余环境变量由调用方以 env 前缀传入。
 # 以「渲染阶段完成 + 首页产物存在」为准，而不是只看退出码：收尾清理被拦时
@@ -325,22 +361,50 @@ if VITE_SITE_URL=https://example.com build_site p6-meta; then
 
   THEME_JS="$(ls "$DIST"/assets/chunks/theme.*.js 2>/dev/null | head -1)"
   if [ -n "$THEME_JS" ]; then
+    # 先把本次验证跑的**产物形态**打进日志。
+    #
+    # DEBUG=1 构建不压缩（vitepress 源码：`minify: … ?? !process.env.DEBUG`），
+    # 而线上构建是压缩的 —— 两边**字面形态不同**。这里如实记录，避免日后又出现
+    # 「验证跑的是 A 形态、线上发的是 B 形态」这种盲区（曾经真的因此漏过一次）。
+    THEME_JS_LINES="$(wc -l < "$THEME_JS" | tr -d ' ')"
+    if [ "$THEME_JS_LINES" -lt 10 ]; then
+      printf '  ... 产物形态：theme JS 已压缩（%s 行）\n' "$THEME_JS_LINES"
+    else
+      printf '  ... 产物形态：theme JS 未压缩（%s 行，DEBUG=1 所致；匹配式须对两种形态都成立）\n' "$THEME_JS_LINES"
+    fi
+
     assert_fixed_absent "$THEME_JS" 'Main Navigation'    "theme JS 无 Main Navigation 残留（否则 hydration 会覆盖回英文）"
     assert_fixed_absent "$THEME_JS" 'Sidebar Navigation' "theme JS 无 Sidebar Navigation 残留"
+    assert_fixed_absent "$THEME_JS" '"Pager"'            "theme JS 无 Pager 残留"
     assert_fixed_absent "$THEME_JS" 'toggle section'     "theme JS 无 toggle section 残留"
     assert_fixed        "$THEME_JS" '主导航'              "theme JS 已本地化导航 aria 标题"
     assert_fixed        "$THEME_JS" '侧边栏导航'          "theme JS 已本地化侧栏 aria 标题"
+    assert_fixed        "$THEME_JS" '翻页导航'            "theme JS 已本地化翻页导航 aria 标题"
+    # 分隔符必须两侧一致，否则 hydration 会把全角冒号改回半角。
+    #
+    # 残留检查用**正则**：压缩形态是 `)+": ",1)`、未压缩形态是 `) + ": ", 1)`，
+    # 单条固定串只能覆盖其中一种。这个模式刻意写成**纯 ASCII** —— 见 assert_re 的说明。
+    assert_re_absent "$THEME_JS" '\+[[:space:]]*": "[[:space:]]*,[[:space:]]*1\)' "theme JS 分隔符无半角冒号残留（压缩/未压缩两种形态都查）"
+    # 「已替换」检查用**固定串**：替换器在两种形态下都输出同一个紧凑写法 `+"：",1)`,
+    # 一条固定串就够；而带全角冒号的正则在本环境的 grep 下会失配（实测，见 assert_re 说明），
+    # 所以这里**不能**用正则。
+    assert_fixed "$THEME_JS" '+"：",1)' "theme JS 分隔符已换为全角"
   else
     bad "未找到 theme.*.js 产物，无法验证 hydration 一致性"
   fi
 
-  # 侧边栏标题只在带侧栏的页面渲染，所以拿文章页验
+  # 侧边栏 / 翻页导航 / 日期分隔符都只在文章页渲染，所以拿文章页验
   POST_HTML="$(ls "$DIST"/posts/*.html 2>/dev/null | head -1)"
   if [ -n "$POST_HTML" ]; then
     assert_fixed_absent "$POST_HTML" 'Sidebar Navigation' "文章页无 Sidebar Navigation 英文残留"
     assert_fixed        "$POST_HTML" '侧边栏导航'         "侧边栏 aria 标题已本地化为中文"
+    assert_fixed_absent "$POST_HTML" '>Pager<'            "文章页无 Pager 英文残留"
+    assert_fixed        "$POST_HTML" '翻页导航'            "翻页导航 aria 标题已本地化为中文"
+    # 「最后更新于」的分隔符：主题模板里写死半角 ': '，替换为全角 '：'
+    assert_fixed_absent "$POST_HTML" ': <time'            "「最后更新于」分隔符不是半角冒号（HTML）"
+    assert_fixed        "$POST_HTML" '：<time'            "「最后更新于」分隔符已换为全角（HTML）"
   else
-    bad "未找到文章页产物，无法验证侧栏 aria 文案"
+    bad "未找到文章页产物，无法验证侧栏 / 翻页 / 日期分隔符文案"
   fi
 
   # ---- 6.5 日期格式化选项 ----
@@ -353,6 +417,24 @@ if VITE_SITE_URL=https://example.com build_site p6-meta; then
   assert_fixed "$DIST/index.html" 'forceLocale\":true'    "日期跟随站点语言而非访客浏览器语言"
 else
   bad "带域名构建失败，见 $LOG"
+fi
+
+# ============================================================
+say "探针 7：主题文案替换对「压缩 / 未压缩」两种产物形态都成立"
+
+# 免构建（毫秒级），用**从真实产物抄下来的**片段做形态回归。
+#
+# 这条是被一次静默事故逼出来的：替换脚本的 JS 匹配式只适配了压缩形态，
+# 于是未压缩产物（DEBUG=1 构建）上 HTML 改了、JS 没改 —— hydration 之后
+# 中文又被覆盖回英文，且不报错。而上面探针 6 跑的恰恰是未压缩产物，
+# 这次是靠断言逮住的；这个探针把它变成**每次都会跑**的固定回归。
+# 详见 README 踩坑 20 与 tools/verify/verify-localize-shapes.mjs 头部。
+if ! command -v node >/dev/null 2>&1; then
+  echo "  ○  跳过：当前环境没有 node（该回归需要 node 直接运行）"
+elif node tools/verify/verify-localize-shapes.mjs; then
+  ok "替换规则同时适配压缩与未压缩两种产物形态"
+else
+  bad "形态回归未通过：匹配式没有同时适配两种产物形态（详见上方输出）"
 fi
 
 # ============================================================

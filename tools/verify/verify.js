@@ -572,6 +572,27 @@ async function main() {
       )
       check('侧栏 aria-labelledby 仍指向存在的 id（改文案没破坏关联）', sidebarAriaLink.ok, sidebarAriaLink.why)
 
+      // 翻页导航（上一篇 / 下一篇）的隐藏标题，原文是硬编码的 "Pager"
+      const pagerAria = await evaluate(
+        cdp,
+        `(document.getElementById('doc-footer-aria-label') || {}).textContent || ''`,
+      )
+      check(
+        '翻页导航 aria 标题已本地化（hydration 后仍是中文）',
+        pagerAria.trim() === '翻页导航',
+        `"${pagerAria.trim()}"`,
+      )
+      const pagerHtml = await evaluate(
+        cdp,
+        `(() => {
+          const nav = document.querySelector('.prev-next')
+          if (!nav) return { ok: false, why: '未找到 .prev-next 元素' }
+          const id = nav.getAttribute('aria-labelledby')
+          return { ok: !!document.getElementById(id), why: 'aria-labelledby=' + id }
+        })()`,
+      )
+      check('翻页导航 aria-labelledby 仍指向存在的 id', pagerHtml.ok, pagerHtml.why)
+
       /*
        * 「最后更新于」必须等于**文章自己 front matter 里的 date**。
        *
@@ -606,6 +627,26 @@ async function main() {
         '日期只到天，没有 YAML 零点换算出来的假时分秒',
         lastUpdatedState.text.length > 0 && !/\d{1,2}:\d{2}/.test(lastUpdatedState.text),
         `"${lastUpdatedState.text}"`,
+      )
+
+      /*
+       * 「最后更新于」的分隔符：主题模板里写死半角 `": "`（VPDocFooterLastUpdated.vue），
+       * 已由 scripts/localize-theme-aria.mjs 换成全角「：」。
+       * 同样验**可见文本**而不是产物文件 —— 只改 HTML 会被 hydration 覆盖回去。
+       *
+       * 断言刻意**精确到分隔符那一个字符**，而不是「整串里出现过全角冒号」：
+       * 后者是弱正向 —— 只要标签里别处碰巧有全角冒号就能过，
+       * 而 hydration 把分隔符改回半角时照样亮红灯。取 `(.)` 捕一个字符最直接。
+       */
+      const lastUpdatedLabel = await evaluate(
+        cdp,
+        `(document.querySelector('.VPLastUpdated') || {}).textContent || ''`,
+      )
+      const lastUpdatedSep = (lastUpdatedLabel.match(/最后更新于\s*(.)/) || [])[1] || ''
+      check(
+        '「最后更新于」用全角冒号分隔（hydration 后可见文本）',
+        lastUpdatedSep === '：',
+        `分隔符="${lastUpdatedSep}"（U+${lastUpdatedSep.codePointAt(0)?.toString(16).toUpperCase() ?? '----'}），整串="${lastUpdatedLabel.trim()}"`,
       )
 
       await cdp.send('Page.captureScreenshot', { format: 'png' })

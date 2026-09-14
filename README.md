@@ -390,12 +390,13 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
 | 键盘「跳到正文」链接 | `themeConfig.skipToContentLabel` |
 | 上一篇 / 下一篇、本页目录、回到顶部、主题切换、侧栏菜单 | `docFooter` / `outline.label` / `returnToTopLabel` / `darkModeSwitch*` / `sidebarMenuLabel` |
 | 正文日期 | 锁定 UTC + 跟随站点语言（否则 UTC-5 的访客会看到前一天） |
-| **主题里写死的** `Main Navigation` / `Sidebar Navigation` / `toggle section` | `scripts/localize-theme-aria.mjs`（构建后替换 HTML **和** theme JS，见踩坑 17） |
+| **主题里写死的** `Main Navigation` / `Sidebar Navigation` / `Pager` / `toggle section` / 日期分隔符 `": "` | `scripts/localize-theme-aria.mjs`（构建后替换 HTML **和** theme JS，见踩坑 17） |
 
 > 最后一行没有官方开关可用 —— `2.0.0-alpha.15` 的主题产物里根本没有读取
 > `navMenuLabel` / `mobileMenuLabel` / `extraMenuLabel` 这几个官方文档提到的键（实测 grep 确认）。
-> 这三条 aria 文案都是 `visually-hidden` 的：普通访客看不见，但读屏用户会听到，
-> 中文站点读出 "Main Navigation" 是真实的无障碍缺陷，所以用构建后替换补上了。
+> 这几处文案都是 `visually-hidden` 的（普通访客看不见，但读屏用户会听到），
+> 中文站点读出 "Main Navigation" / "Pager" 是真实的无障碍缺陷；日期分隔符那条则纯属排版
+> （整行都是中文，用全角「：」更整齐）。因为都没有配置键，所以用构建后替换补上。
 
 嵌入组件（L2）这边：
 
@@ -570,8 +571,13 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
 
 17. **只改产物 HTML 不改 theme JS，中文会在 hydration 之后被覆盖回英文。**
 
-    踩坑 16 最后剩了三条纹丝不动的英文：`Main Navigation` / `Sidebar Navigation` /
-    `toggle section`。它们是主题组件里的**字面量**，`2.0.0-alpha.15` 没有任何配置键能改，
+    踩坑 16 之后还剩下几条纹丝不动的英文：`Main Navigation` / `Sidebar Navigation` /
+    `Pager`（上一篇/下一篇的隐藏标题）/ `toggle section`。
+    最后一轮排查又把整个 `theme-default` 目录里所有 `visually-hidden` 的 aria 目标扫了一遍，
+    才确认这就是全部 —— 逐个 grep 过 `aria-labelledby` 指向的隐藏文本。
+    另外顺手把「最后更新于」那个半角 `: ` 分隔符也换成全角「：」（纯排版，同一套机制）。
+
+    它们都是主题组件里的**字面量**，`2.0.0-alpha.15` 没有任何配置键能改，
     于是改用构建后替换（`scripts/localize-theme-aria.mjs`，挂在 `build:site` 之后）。
 
     第一版只替换了 `.html` —— grep 产物确认「英文没了、中文在」，看着已经修好了。
@@ -674,6 +680,69 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
       已改成记录来源 URL、排除预期内的 404，并把排除数量打印出来 ——
       一条永远红的断言等于没有断言，而且会训练所有人忽略它。
 
+20. **验证构建和线上构建的产物「形态」不同，让一个静默失效的替换溜了过去。**
+
+    `localize-theme-aria.mjs` 第一版的 JS 匹配式是照着**压缩产物**写的：
+
+    | 规则 | 第一版 JS 匹配式 | 压缩产物 | 未压缩产物 |
+    |---|---|---|---|
+    | 翻页导航 | `(?<="doc-footer-aria-label"\},)"Pager"` | ✅ `…-label"},"Pager"` 同行 | ❌ 跨行，`}` 不在同一行 |
+    | 日期分隔符 | `\+": ",1\)` | ✅ `+": ",1)` | ❌ 实际是 `+ ": ", 1)`（有空格） |
+
+    未压缩产物里的真实形态（两处都跨行／带空格）：
+
+    ```js
+    id: "doc-footer-aria-label"
+              }, "Pager", -1)),
+    … || "Last updated") + ": ", 1),
+    ```
+
+    为什么会有两种形态 —— vitepress 源码里就一行：
+
+    ```js
+    minify: ssr ? !!config.mpa : options.minify ?? !process.env.DEBUG
+    ```
+
+    **`DEBUG` 有值就不压缩。** 而验证脚本为了绕开沙箱的批量删除拦截一直在用 `DEBUG=1`
+    （原因见 `tools/verify/verify-config.sh` 头部）—— 于是「验证时跑的产物」和
+    「线上发的产物」形态根本不同。实测证据：29 份 `DEBUG=1` 产物全是 3216 行未压缩、
+    `Pager` 仍在；而 `.out/deploy/*` 与 `docs/.vitepress/dist` 全是 2 行压缩、替换正确。
+
+    后果不是「替换失败」，是**一半失败**：HTML 改成中文、theme JS 还是英文，
+    hydration 之后中文又被覆盖回英文（与踩坑 17 同一套机制），而且不报错。
+
+    更要紧的是**为什么没早发现**：脚本当时只看「这条规则总共命中几处」，
+    HTML 命中了就记成功，日志一片绿。所以顺手加了**分通道统计** ——
+    HTML / JS 分别计数，只命中一侧就告警，半成品不该被当成完成品。
+
+    同一个坑还带出一类**假绿断言**：`assert_fixed_absent "$THEME_JS" '+": ",1)'`
+    用的是固定串，而未压缩产物里是 `+ ": ", 1)` —— 「不残留」这条必然通过，
+    可它其实残留着。所以新增 `assert_re` / `assert_re_absent`（正则版），
+    凡断言对象可能有多种字面形态就用正则，并在探针里打印「本次验的是哪种形态」。
+
+    改完这两条断言，**它们自己先红了一次**：带全角冒号的正则，
+    在「明明已经替换成功」的产物上判失败。查下来是本环境 grep（msys2）的老毛病 ——
+    正则里同时出现**多字节字符**和**字符类**就会失配，而且与 locale 无关
+    （`C.UTF-8` 与 `LC_ALL=C` 表现一致）。受控样本（手工构造「全角/半角 × 压缩/未压缩」
+    四个文件）测出来的结果：
+
+    | 模式 | 命中 | 应该有 |
+    |---|---|---|
+    | `\+[[:space:]]*": "[[:space:]]*,[[:space:]]*1\)`（纯 ASCII） | 1 | ✅ |
+    | `\+[[:space:]]*"：[[:space:]]*,[[:space:]]*1\)`（含全角冒号） | **0** | ❌ 应为 1 |
+    | `+"：",1)`（`grep -F` 固定串） | 1 | ✅ |
+
+    于是定下规矩：**带中文或全角的断言一律用 `grep -F`（`assert_fixed`），
+    正则只留给纯 ASCII 模式。** 这也顺带解释了为什么原有那一大批中文断言
+    （全部走 `grep -F`）一直很稳 —— 不是运气好，是没踩到这条。
+
+    *「改断言」本身也要验：这两条新断言第一版是错的，而且错在**断言侧**不是产物侧 ——
+    如果当时不在受控样本上比对，很容易反过来去「修」本来正确的产物。*
+
+    *教训：环境差异不止「依赖版本」「操作系统」这类显式的，还有**构建期开关**这种隐式的。
+    凡是对产物做字符串手术，匹配式就必须对空白／压缩形态免疫（一律 `\s*`）；
+    并且验证脚本要把「本次验的是哪种形态」打进日志 —— 把盲区变成看得见的一行。*
+
 ## 关键命令速查
 
 ```bash
@@ -694,9 +763,14 @@ VITE_OUT_DIR=build/site npm run build:site                   # 指定输出目�
 # 验证（四层，都是可重复运行的脚本）
 ROUNDS=3 node tools/verify/verify.js           # ① 浏览器端到端：需先 npm run build:site + build:embed
 bash tools/verify/verify-config.sh             # ② 架构与配置一致性：自己会重建，结束自动还原
+                                               #    末尾含「产物形态」回归（探针 7，免构建），见踩坑 20
 node tools/verify/verify-deploy-modes.mjs      # ③ 部署形态：自己构建两种 base 并用浏览器取证
 bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
                                                # ④ 干净克隆复现 CI：等价于 Cloudflare 检出后的状态
+
+# 单独跑第 ② 层里的形态回归（毫秒级、不需要构建）：
+node tools/verify/verify-localize-shapes.mjs
+                                               # 验「构建后替换」对压缩 / 未压缩两种产物形态都成立
 ```
 
 > **构建产物里还会多出两个文件**，都不是手写进仓库的，而是构建期生成的：
