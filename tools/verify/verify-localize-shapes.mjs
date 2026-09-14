@@ -152,7 +152,7 @@ function run() {
       ['JS 无 Sidebar Navigation 残留', !js.includes('Sidebar Navigation')],
       ['JS 无 Pager 残留', !js.includes('Pager')],
       ['JS 无 toggle section 残留', !js.includes('toggle section')],
-      ['JS 无半角分隔符残留（"： " 未替换）', !/\+\s*": "\s*,\s*1\)/.test(js)],
+      ['JS 无半角分隔符残留（": " 未替换）', !/\+\s*": "\s*,\s*1\)/.test(js)],
       ['JS 已写入主导航', js.includes(aria.mainNav)],
       ['JS 已写入侧边栏导航', js.includes(aria.sidebarNav)],
       ['JS 已写入翻页导航', js.includes(aria.docFooter)],

@@ -760,13 +760,15 @@ VITE_ADSENSE_CLIENT=ca-pub-xxx npm run build:site            # 启用 AdSense
 VITE_OUT_DIR=build/site npm run build:site                   # 指定输出目录（多套产物并存）
 # 注意：不要用 VITE_BASE=./ —— 本站有 posts/ 子目录，会让深层页面资源全部 404，见上文说明
 
-# 验证（四层，都是可重复运行的脚本）
+# 验证（五层，都是可重复运行的脚本）
 ROUNDS=3 node tools/verify/verify.js           # ① 浏览器端到端：需先 npm run build:site + build:embed
 bash tools/verify/verify-config.sh             # ② 架构与配置一致性：自己会重建，结束自动还原
                                                #    末尾含「产物形态」回归（探针 7，免构建），见踩坑 20
 node tools/verify/verify-deploy-modes.mjs      # ③ 部署形态：自己构建两种 base 并用浏览器取证
 bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
                                                # ④ 干净克隆复现 CI：等价于 Cloudflare 检出后的状态
+node tools/verify/verify-live.mjs              # ⑤ 线上真机验收：验**已部署**的产物 + hydration 之后的 DOM
+                                               #    OLD_THEME=theme.xxx.js 可先等新构建上线再验
 
 # 单独跑第 ② 层里的形态回归（毫秒级、不需要构建）：
 node tools/verify/verify-localize-shapes.mjs
@@ -776,6 +778,13 @@ node tools/verify/verify-localize-shapes.mjs
 > **构建产物里还会多出两个文件**，都不是手写进仓库的，而是构建期生成的：
 > `sitemap.xml`（配了域名才有）与 `robots.txt`（由 `config.mjs` 的 `buildEnd` 从
 > `site.config.mjs` 的 `url` 派生，顺带声明 `Sitemap:` 地址）。
+
+> **为什么第 ⑤ 层不能省**：前四层验的都是「本地构建出来的东西对不对」，但本地
+> `docs/.vitepress/dist` 与线上产物之间还隔着一次 CI 构建。更要紧的是本项目踩过的
+> **hydration 覆盖**（踩坑 17）：构建后替换脚本同时改 HTML 与 theme JS，只改一侧时
+> 静态 HTML 是对的、浏览器一 hydrate 就被 JS 里的英文覆盖回去，**且不报任何错**。
+> 所以 `verify-live.mjs` 用真实浏览器读 hydration 之后的 DOM，而不是 grep 静态文件——
+> `[PASS] hydration 后翻页导航 aria = 翻页导航` 这种断言，只有线上真机能给。
 
 ## 技术栈
 
