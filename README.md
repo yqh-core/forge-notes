@@ -855,6 +855,12 @@ node tools/verify/verify-live.mjs              # ⑤ 线上真机验收：验**�
 # 单独跑第 ② 层里的形态回归（毫秒级、不需要构建）：
 node tools/verify/verify-localize-shapes.mjs
                                                # 验「构建后替换」对压缩 / 未压缩两种产物形态都成立
+
+# 本地化审计（改文案后先跑这个，别按题修）：
+node tools/verify/audit-l10n.mjs
+                                               # 摊开产物里全部 aria-label / title / label 取值，
+                                               # 列出疑似英文残留。exit 0 = 干净，2 = 有残留。
+                                               # 加新 UI 文案后跑一次，能发现「漏掉的那几处」。
 ```
 
 > **构建产物里还会多出两个文件**，都不是手写进仓库的，而是构建期生成的：

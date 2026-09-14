@@ -34,6 +34,9 @@ const SHOT_DIR = path.join(ROOT, '.verify')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+// 由产物层探测后设置：验收用的文章页是否有代码块（决定渲染层能否验复制按钮）
+let ARTICLE_HAS_CODE = false
+
 const checks = []
 function check(name, pass, detail = '') {
   checks.push({ name, pass: !!pass, detail: String(detail).slice(0, 200) })
@@ -97,6 +100,10 @@ async function artifactLayer(themeChunk) {
       ['侧边栏导航', true, 'theme JS 已本地化「侧边栏导航」'],
       ['Sidebar Navigation', false, 'theme JS 无 Sidebar Navigation 残留'],
       ['toggle section', false, 'theme JS 无 toggle section 残留'],
+      ['更多', true, 'theme JS 已本地化「更多」（右上角导航）'],
+      ['extra navigation', false, 'theme JS 无 extra navigation 残留'],
+      ['移动端导航', true, 'theme JS 已本地化「移动端导航」（汉堡菜单）'],
+      ['mobile navigation', false, 'theme JS 无 mobile navigation 残留'],
       ['"：",1)', true, 'theme JS 日期分隔符已换为全角'],
       ['": ",1)', false, 'theme JS 日期分隔符无半角残留'],
     ],
@@ -111,6 +118,19 @@ async function artifactLayer(themeChunk) {
   check('文章页 HTML 无半角冒号残留', !/最后更新于:\s*<time/.test(art))
   check('文章页 HTML 翻页导航已本地化', art.includes('翻页导航'))
   check('文章页 HTML 无 Pager 残留', !art.includes('Pager'))
+
+  // 以下是「构建期渲染」的两类：静态 HTML 与页面 chunk JS 天然一致，
+  // 但仍然要在线上确认一次 —— 它们各自踩过静默失效（见 README 踩坑 21）。
+  check('文章页 HTML 标题锚点已本地化', art.includes('固定链接'))
+  check('文章页 HTML 无 Permalink to 残留', !art.includes('Permalink to'))
+  check('文章页 HTML 复制按钮提示已本地化', art.includes('title="复制代码"'))
+  check('文章页 HTML 无 Copy Code 残留', !art.includes('Copy Code'))
+
+  // 复制按钮只在含代码块的页面渲染 —— 渲染层的对应断言以此为前提。
+  // 自定义 ARTICLE 时如果选了纯说明页，这里会明确报出来，而不是让渲染层红得莫名其妙。
+  ARTICLE_HAS_CODE = /class="copy"/.test(art)
+  check('验收用文章页含代码块（复制按钮断言的前提）', ARTICLE_HAS_CODE,
+    ARTICLE_HAS_CODE ? `代码块 ${art.split('class="copy"').length - 1} 个` : '自定义 ARTICLE 请选含代码块的页面')
 }
 
 /* ---------------------------- ② 渲染层 ---------------------------- */
@@ -226,6 +246,34 @@ async function renderLayer() {
     const lastUpd = await evaluate(cdp, `(document.querySelector('.VPLastUpdated')||{}).textContent || ''`)
     check('hydration 后「最后更新于」用全角冒号',
       lastUpd.includes('：') && !lastUpd.includes('最后更新于:'), `"${lastUpd.trim()}"`)
+
+    // 「构建期渲染」的两类（锚点 / 复制按钮）在 hydration 之后的状态。
+    // 静态 HTML 正确不代表 DOM 正确 —— 只有这里读到的是最终结果。
+    const anchor = await evaluate(cdp, `(() => {
+      const a = document.querySelector('.VPDoc .header-anchor')
+      return { found: !!a, label: a ? a.getAttribute('aria-label') || '' : '' }
+    })()`)
+    check('hydration 后标题锚点 aria 已本地化',
+      anchor.found && /固定链接$/.test(anchor.label) && !/Permalink to/.test(anchor.label),
+      anchor.found ? `"${anchor.label}"` : '未找到 .VPDoc .header-anchor')
+
+    if (ARTICLE_HAS_CODE) {
+      const copy = await evaluate(cdp, `(() => {
+        const all = document.querySelectorAll('button.copy')
+        return { n: all.length, title: all[0] ? all[0].getAttribute('title') || '' : '' }
+      })()`)
+      check('hydration 后复制按钮提示已本地化', copy.n > 0 && copy.title === '复制代码',
+        `共 ${copy.n} 个，title="${copy.title}"`)
+    } else {
+      check('hydration 后复制按钮提示已本地化', false, '跳过条件不成立：验收文章页无代码块')
+    }
+
+    const social = await evaluate(cdp, `(() => {
+      const a = document.querySelector('.VPSocialLink')
+      return { found: !!a, label: a ? a.getAttribute('aria-label') || '' : '' }
+    })()`)
+    check('hydration 后社交链接 aria 不是图标名', social.found && social.label === 'GitHub',
+      social.found ? `"${social.label}"` : '未找到 .VPSocialLink')
 
     const bodyText = await evaluate(cdp, 'document.body.innerText.slice(0,400)')
     check('页面有正文（不是空白/错误页）', typeof bodyText === 'string' && bodyText.trim().length > 30,
