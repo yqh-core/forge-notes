@@ -32,6 +32,15 @@ const PORT_CDP = 9333
 const BASE_SITE = `http://127.0.0.1:${PORT_SITE}`
 const BASE_HOST = `http://127.0.0.1:${PORT_HOST}`
 
+/**
+ * L1-5 里**故意**访问的不存在路径。
+ *
+ * 主文档返回 404 会被 Chrome 记成一条控制台 error —— 那是我们要验的行为本身，
+ * 不是缺陷。所以「无预期外控制台错误」这条断言要把这个地址排除掉，
+ * 否则它永远红着，红久了就没人看了。
+ */
+const EXPECTED_404_PATH = '/no-such-page-xyz'
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -78,6 +87,21 @@ function createServer(rootDir) {
     }
 
     if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+      /*
+       * 未知路径：对齐 Cloudflare Pages 的行为 —— 产物根目录有 404.html 就
+       * 以 404 状态把它返回，否则才是纯文本兜底。
+       *
+       * 为什么要在本地模拟：真实站点上「未知路径返真 404 而不是软 404」
+       * 完全由这一步决定。本地服务器若不模拟，404 页就只能等上线才暴露问题，
+       * 而 Cloudflare 对没有 404.html 的站点会走 SPA 兜底，返回 200 + 首页 ——
+       * 那是 SEO 上最难查的软 404。
+       */
+      const custom404 = path.join(root, '404.html')
+      if (fs.existsSync(custom404)) {
+        res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+        fs.createReadStream(custom404).pipe(res)
+        return
+      }
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('404 ' + urlPath)
       return
@@ -264,14 +288,29 @@ async function main() {
     await cdp.send('Page.enable')
     await cdp.send('Runtime.enable')
     await cdp.send('Log.enable')
+    // 无头标签页默认不「持有焦点」，键盘默认行为（按钮的回车激活等）不会发生。
+    // 不打开这个，下面测键盘操作时会把「没焦点」误判成「组件不支持键盘」。
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true })
 
-    // 控制台错误收集
+    // 控制台错误收集。
+    //
+    // ⚠️ 必须带上**来源 URL**：主文档自身返回 404，Chrome 也会在控制台记一条
+    // error 级日志（text 里只有「Failed to load resource: 404」，不含 URL）。
+    // 而我们在 L1-5 里是**故意**访问一个不存在的路径的 —— 不记录来源，
+    // 就没法把「预期内的 404」和「真的坏了」分开，这条断言会永远红着，
+    // 然后所有人就都学会忽略它了。那等于没有断言。
     let consoleErrors = []
+    let currentPageUrl = ''
     cdp.on((msg) => {
-      if (msg.method === 'Runtime.exceptionThrown') {
+      if (msg.method === 'Page.frameNavigated' && !msg.params.frame?.parentId) {
+        currentPageUrl = msg.params.frame.url
+      } else if (msg.method === 'Runtime.exceptionThrown') {
         consoleErrors.push('exception: ' + (msg.params.exceptionDetails?.text || 'unknown'))
       } else if (msg.method === 'Log.entryAdded' && msg.params.entry.level === 'error') {
-        consoleErrors.push('log: ' + msg.params.entry.text)
+        const e = msg.params.entry
+        // entry.url 对主文档 404 可能是空的，那就退回到「当时所在的页面地址」
+        const where = e.url || currentPageUrl || '(未知来源)'
+        consoleErrors.push(`log: [${e.source}] ${e.text}  @ ${where}`)
       }
     })
 
@@ -318,6 +357,149 @@ async function main() {
 
       await cdp.send('Page.captureScreenshot', { format: 'png' })
         .then((s) => fs.writeFileSync(path.join(OUT_DIR, `r${round}-l1-home.png`), Buffer.from(s.data, 'base64')))
+
+      /* ---------------- L1-1a 主题硬编码 aria 本地化 ---------------- */
+      // 这三条 aria 文案是主题里**写死的英文**（alpha.15 没有任何配置键能改），
+      // 靠 scripts/localize-theme-aria.mjs 在构建后替换 HTML + theme JS。
+      //
+      // ⚠️ 必须**在 hydration 之后**读 DOM，这是本轮最容易骗过自己的地方：
+      //   只改 HTML 不改 theme JS 的话，Vue 会在 hydration 时按 JS 里的字面量
+      //   把中文修正回英文 —— 首屏看着是中文，一秒后变回英文，而且不报任何错。
+      //   所以这里不是去 grep 产物文件，而是在真实浏览器里读 textContent：
+      //   此时已过 waitReady + 1200ms，拿到的是 hydration 之后的最终状态。
+      const mainNavAria = await evaluate(
+        cdp,
+        `(document.getElementById('main-nav-aria-label') || {}).textContent || ''`,
+      )
+      check(
+        '导航栏 aria 标题已本地化（hydration 后仍是中文）',
+        mainNavAria.trim() === '主导航',
+        `"${mainNavAria.trim()}"`,
+      )
+
+      const ariaHtml = await evaluate(cdp, 'document.documentElement.outerHTML')
+      check('页面 HTML 无 "Main Navigation" 英文残留', !ariaHtml.includes('Main Navigation'))
+      // 注意这里必须 null-safe：早期写成 document.querySelector('.VPNavBarMenu').getAttribute(...)，
+      // 一旦这个元素不存在（正是上面那个「导航栏整棵子树崩掉」的 bug 的形态），
+      // 表达式直接抛异常，**整轮剩余断言全部不跑** —— 后面几十条断言被一条掩盖掉了。
+      // 断言工具自己出错时应该只算这一条失败，不能中断整轮。
+      const ariaLink = await evaluate(
+        cdp,
+        `(() => {
+          const nav = document.querySelector('.VPNavBarMenu')
+          if (!nav) return { ok: false, why: '未找到 .VPNavBarMenu 元素' }
+          const id = nav.getAttribute('aria-labelledby')
+          return { ok: !!document.getElementById(id), why: 'aria-labelledby=' + id }
+        })()`,
+      )
+      check('aria-labelledby 仍指向存在的 id（改文案没破坏关联）', ariaLink.ok, ariaLink.why)
+
+      /* ---------------- L1-1b 搜索 UI 本地化（真实交互） ---------------- */
+      // 只在配置里写了翻译键是不够的 —— 键名写错会**静默失效**，
+      // 所以这里真的把弹窗打开、真的输入内容，量它渲染出来的文案。
+      console.log('\n[L1] 搜索 UI 本地化')
+      const navSearchText = await evaluate(
+        cdp,
+        `(document.querySelector('.DocSearch-Button-Placeholder') || {}).innerText || ''`,
+      )
+      check('导航栏搜索按钮是中文', navSearchText.trim() === '搜索', `text="${navSearchText}"`)
+
+      const skipLinkText = await evaluate(
+        cdp,
+        `(document.querySelector('.VPSkipLink') || {}).innerText || ''`,
+      )
+      check('「跳到正文」链接已本地化', skipLinkText.trim() === '跳到正文', `text="${skipLinkText}"`)
+
+      await evaluate(cdp, `document.querySelector('.DocSearch-Button').click(), true`)
+      await sleep(700)
+      const modalState = await evaluate(
+        cdp,
+        `(() => {
+          const input = document.querySelector('#localsearch-input')
+          return {
+            opened: !!document.querySelector('.VPLocalSearchBox'),
+            placeholder: input ? input.placeholder : '',
+            resetTitle: (document.querySelector('.clear-button') || {}).title || '',
+            backTitle: (document.querySelector('.back-button') || {}).title || '',
+          }
+        })()`,
+      )
+      check('点击后搜索弹窗真的打开', modalState.opened)
+      check('搜索框 placeholder 已本地化', modalState.placeholder === '搜索', `"${modalState.placeholder}"`)
+      check('「重置搜索」按钮已本地化', modalState.resetTitle === '重置搜索', `"${modalState.resetTitle}"`)
+      check('「关闭搜索」按钮已本地化', modalState.backTitle === '关闭搜索', `"${modalState.backTitle}"`)
+
+      /*
+       * 搜索要验**两个对照**：先证明能搜到，再验搜不到时的文案。
+       *
+       * 为什么必须有正向对照：只验「搜不到时显示中文」，无法区分两种情况 ——
+       *   (a) 搜索正常工作，这个词确实搜不到      → 应该通过
+       *   (b) 检索压根没跑起来，结果列表永远是空的 → 也会「通过」（假绿）
+       * 加一条正向对照（一个必须搜得到的词）就能把 (b) 排除掉。
+       *
+       * 另一个坑：「必搜不到的词」不能随便编。MiniSearch 配的是
+       * prefix: true + fuzzy: 0.2，最初用的 `zzz-definitely-no-such-thing`
+       * 会被切成词元，其中 `no` 能**前缀匹配**到全站都有的 `notes` ——
+       * 它其实搜得到结果，所以 .no-results 永远不出现。换成不含常见前缀的乱串。
+       */
+      const typeQuery = async (text) => {
+        // focus + select()：insertText 会**替换当前选区**，所以这样等于「清空并重输」。
+        // 比手动改 value 好 —— 后者绕过了 v-model，测不出真实输入路径。
+        await evaluate(
+          cdp,
+          `(() => { const i = document.querySelector('#localsearch-input'); if (!i) return false; i.focus(); i.select(); return true })()`,
+        )
+        await sleep(120)
+        await cdp.send('Input.insertText', { text })
+      }
+
+      const readSearchState = () =>
+        evaluate(
+          cdp,
+          `(() => {
+            const input = document.querySelector('#localsearch-input')
+            return {
+              typed: input ? input.value : '',
+              results: document.querySelectorAll('.results .result').length,
+              noResults: (document.querySelector('.no-results') || {}).innerText || '',
+            }
+          })()`,
+        )
+
+      // ---- 正向对照：这个词必须搜得到 ----
+      await typeQuery('AdSense')
+      let hitState = await readSearchState()
+      for (let i = 0; i < 25 && hitState.results === 0; i++) {
+        await sleep(200)
+        hitState = await readSearchState()
+      }
+      check(
+        '搜索能返回结果（正向对照，防止「搜索整个坏掉」蒙混过关）',
+        hitState.results > 0,
+        `输入 "${hitState.typed}" → ${hitState.results} 条结果`,
+      )
+
+      // ---- 反向对照：搜不到时文案是中文 ----
+      await typeQuery('zzqqxxjjvvkkwwyy')
+      let missState = await readSearchState()
+      for (let i = 0; i < 25 && !missState.noResults; i++) {
+        await sleep(200)
+        missState = await readSearchState()
+      }
+      check(
+        '搜索无结果文案已本地化',
+        /没有结果/.test(missState.noResults),
+        missState.noResults
+          ? missState.noResults.slice(0, 60)
+          : `输入 "${missState.typed}" 后 .no-results 未出现（该词意外匹配到 ${missState.results} 条结果）`,
+      )
+
+      await cdp.send('Page.captureScreenshot', { format: 'png' })
+        .then((s) => fs.writeFileSync(path.join(OUT_DIR, `r${round}-l1-search.png`), Buffer.from(s.data, 'base64')))
+
+      // 关掉弹窗，避免残留遮罩影响后续断言
+      await evaluate(cdp, `document.querySelector('.back-button').click(), true`)
+      await sleep(500)
 
       /* ---------------- L1-2 文章列表 ---------------- */
       console.log('\n[L1] 文章列表页')
@@ -368,6 +550,64 @@ async function main() {
       check('侧边栏含文章列表入口', /文章列表/.test(sidebarText))
       check('侧边栏含具体文章标题', /AdSense/.test(sidebarText))
 
+      // 侧边栏的 aria 标题同样是主题写死的英文，见 L1-1a 的说明。
+      // 这里在真实文章页（带侧边栏）上验，且同样是 hydration 之后的 DOM。
+      const sidebarAria = await evaluate(
+        cdp,
+        `(document.getElementById('sidebar-aria-label') || {}).textContent || ''`,
+      )
+      check(
+        '侧边栏 aria 标题已本地化（hydration 后仍是中文）',
+        sidebarAria.trim() === '侧边栏导航',
+        `"${sidebarAria.trim()}"`,
+      )
+      const sidebarAriaLink = await evaluate(
+        cdp,
+        `(() => {
+          const nav = document.querySelector('.VPSidebar .nav')
+          if (!nav) return { ok: false, why: '未找到 .VPSidebar .nav 元素' }
+          const id = nav.getAttribute('aria-labelledby')
+          return { ok: !!document.getElementById(id), why: 'aria-labelledby=' + id }
+        })()`,
+      )
+      check('侧栏 aria-labelledby 仍指向存在的 id（改文案没破坏关联）', sidebarAriaLink.ok, sidebarAriaLink.why)
+
+      /*
+       * 「最后更新于」必须等于**文章自己 front matter 里的 date**。
+       *
+       * 这条断言是钉住一个只在线上暴露的 bug：VitePress 用一次
+       * `git log --name-only` 扫全仓建「文件→时间」映射，而 Cloudflare Pages
+       * 检出的是浅克隆，边界提交会被当成「改了所有文件」，
+       * 于是全站日期都变成当次部署的提交时间。本地全量历史下看不出来。
+       * 所以这里不比「今天」，而是直接和文章里的 date 对照。
+       */
+      const lastUpdatedState = await evaluate(
+        cdp,
+        `(() => {
+          const p = document.querySelector('.VPLastUpdated')
+          const t = p ? p.querySelector('time') : null
+          return {
+            present: !!p,
+            datetime: t ? t.getAttribute('datetime') : '',
+            text: t ? t.innerText : '',
+          }
+        })()`,
+      )
+      const welcomeMdPath = path.join(ROOT, 'docs/posts', welcomeFile.replace(/\.html$/, '.md'))
+      const welcomeDate = (fs.readFileSync(welcomeMdPath, 'utf8').match(/^date:\s*(\S+)/m) || [])[1] || ''
+      const expectedIso = welcomeDate ? new Date(`${welcomeDate}T00:00:00.000Z`).toISOString() : ''
+      check('文章页显示「最后更新于」', lastUpdatedState.present && !!lastUpdatedState.datetime, lastUpdatedState.datetime)
+      check(
+        '「最后更新于」取文章 front matter 的 date（不是构建时间）',
+        !!expectedIso && lastUpdatedState.datetime === expectedIso,
+        `页面=${lastUpdatedState.datetime} 期望=${expectedIso}（date: ${welcomeDate}）`,
+      )
+      check(
+        '日期只到天，没有 YAML 零点换算出来的假时分秒',
+        lastUpdatedState.text.length > 0 && !/\d{1,2}:\d{2}/.test(lastUpdatedState.text),
+        `"${lastUpdatedState.text}"`,
+      )
+
       await cdp.send('Page.captureScreenshot', { format: 'png' })
         .then((s) => fs.writeFileSync(path.join(OUT_DIR, `r${round}-l1-post.png`), Buffer.from(s.data, 'base64')))
 
@@ -380,6 +620,45 @@ async function main() {
       const aboutText = await evaluate(cdp, `document.querySelector('.VPDoc')?.innerText || document.body.innerText`)
       check('关于页含 yqh-core', /yqh-core/.test(aboutText))
       check('关于页无原作者联系方式', !/geeeeeeeek|java1024|kefu308@gmail/.test(aboutText))
+
+      // 没有 date 的页面不显示「最后更新于」—— 宁可不显示，也不编造一个日期
+      const aboutHasLastUpdated = await evaluate(cdp, `!!document.querySelector('.VPLastUpdated')`)
+      check('无 date 的页面不显示「最后更新于」', !aboutHasLastUpdated)
+
+      /* ---------------- L1-5 404 页 ---------------- */
+      // 404 页的内容是**客户端渲染**的（VitePress 生成的 404.html 里 #app 是空的），
+      // 所以必须真的用浏览器访问一个不存在的路径才能验证，光看产物文件不够。
+      console.log('\n[L1] 404 页')
+      await cdp.send('Page.navigate', { url: `${BASE_SITE}${EXPECTED_404_PATH}` })
+      await waitReady(cdp)
+      await sleep(1000)
+      const notFoundState = await evaluate(
+        cdp,
+        `(() => {
+          const box = document.querySelector('.NotFound')
+          const link = document.querySelector('.NotFound .link')
+          return {
+            hasBox: !!box,
+            code: (document.querySelector('.NotFound .code') || {}).innerText || '',
+            title: (document.querySelector('.NotFound .title') || {}).innerText || '',
+            linkText: link ? link.innerText : '',
+            linkHref: link ? link.getAttribute('href') : '',
+            bodyText: document.body.innerText || '',
+          }
+        })()`,
+      )
+      check('404 页渲染出主题的未找到视图', notFoundState.hasBox)
+      check('404 页显示 404', notFoundState.code.trim() === '404', notFoundState.code)
+      check('404 页标题已本地化', notFoundState.title.trim() === '页面不存在', notFoundState.title)
+      check(
+        '404 页有「回到首页」链接且指向站点根',
+        notFoundState.linkText.trim() === '回到首页' && notFoundState.linkHref === '/',
+        `${notFoundState.linkText} -> ${notFoundState.linkHref}`,
+      )
+      check('404 页无英文默认文案残留', !/PAGE NOT FOUND|Take me home/.test(notFoundState.bodyText))
+
+      await cdp.send('Page.captureScreenshot', { format: 'png' })
+        .then((s) => fs.writeFileSync(path.join(OUT_DIR, `r${round}-l1-404.png`), Buffer.from(s.data, 'base64')))
 
       /* ---------------- L2 嵌入组件 ---------------- */
       console.log('\n[L2] 嵌入组件（宿主页面）')
@@ -424,16 +703,51 @@ async function main() {
       await cdp.send('Page.captureScreenshot', { format: 'png' })
         .then((s) => fs.writeFileSync(path.join(OUT_DIR, `r${round}-l2-embed.png`), Buffer.from(s.data, 'base64')))
 
-      // 交互：点击卡片进详情
-      await evaluate(
+      /*
+       * 交互：用**键盘**打开第一篇。
+       *
+       * 旧实现是 `<li @click>` —— 不可聚焦、没有键盘事件、也没有语义，
+       * 键盘与读屏用户根本打不开文章。所以这里不测「能点」，
+       * 测「能 Tab 到、能回车触发」，这样那种实现会被直接判失败。
+       */
+      const cardA11y = await evaluate(
         cdp,
         `(() => {
-          const card = document.querySelector('forge-notes').shadowRoot.querySelector('.fn-card')
-          card.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-          return true
+          const sr = document.querySelector('forge-notes').shadowRoot
+          const btn = sr.querySelector('.fn-card-btn')
+          if (!btn) return { ok: false, reason: 'no-fn-card-btn（卡片里没有真实按钮）' }
+          btn.focus()
+          return {
+            ok: true,
+            tag: btn.tagName,
+            focused: sr.activeElement === btn,
+            insideHeading: !!btn.closest('.fn-card-title'),
+          }
         })()`,
       )
-      await sleep(800)
+      check(
+        'L2 卡片是可聚焦的真实 button',
+        cardA11y.ok && cardA11y.tag === 'BUTTON' && cardA11y.focused,
+        JSON.stringify(cardA11y),
+      )
+      check('L2 按钮在标题里（保留三级标题语义）', !!cardA11y.insideHeading)
+
+      // 派发真按键：浏览器对 <button> 的默认行为就是 Enter 触发 click。
+      // ⚠️ keyDown 必须带 text:'\r'，否则 CDP 发出去的是「无字符的原始按键」，
+      //    Chrome 不会执行按钮的默认激活 —— 会误判成组件不支持键盘。
+      //    这一点与 Puppeteer 的 keyboard.press('Enter') 实现一致。
+      for (const type of ['keyDown', 'keyUp']) {
+        await cdp.send('Input.dispatchKeyEvent', {
+          type,
+          key: 'Enter',
+          code: 'Enter',
+          text: type === 'keyDown' ? '\r' : undefined,
+          unmodifiedText: type === 'keyDown' ? '\r' : undefined,
+          windowsVirtualKeyCode: 13,
+          nativeVirtualKeyCode: 13,
+        })
+      }
+      await sleep(900)
 
       const postState = await evaluate(
         cdp,
@@ -452,15 +766,32 @@ async function main() {
       check('L2 详情渲染出正文内容', postState.contentLen > 500, `htmlLen=${postState.contentLen}`)
       check('L2 详情有返回按钮', postState.hasBack)
 
+      // 换视图后焦点要跟过去：详情是把列表整个替换掉的，
+      // 不管焦点的话它会掉回 <body>，键盘用户得从页首重新 Tab。
+      const focusAfterOpen = await evaluate(
+        cdp,
+        `(() => {
+          const sr = document.querySelector('forge-notes').shadowRoot
+          return {
+            isBack: sr.activeElement === sr.querySelector('.fn-back'),
+            active: sr.activeElement ? sr.activeElement.className : '(无)',
+          }
+        })()`,
+      )
+      check('L2 进入详情后焦点移到「返回列表」', focusAfterOpen.isBack, focusAfterOpen.active)
+
       await cdp.send('Page.captureScreenshot', { format: 'png' })
         .then((s) => fs.writeFileSync(path.join(OUT_DIR, `r${round}-l2-post.png`), Buffer.from(s.data, 'base64')))
 
-      // 交互：返回列表
+      // 交互：返回列表。
+      // 用可选链 —— 上一步若失败这里会是 null，早期写法直接抛 TypeError，
+      // 把整轮验证打断在中间，看不到后面还有多少问题。
       await evaluate(
         cdp,
         `(() => {
           const b = document.querySelector('forge-notes').shadowRoot.querySelector('.fn-back')
-          b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+          if (!b) return false
+          b.click()
           return true
         })()`,
       )
@@ -470,6 +801,24 @@ async function main() {
         `!!document.querySelector('forge-notes').shadowRoot.querySelector('.fn-list')`,
       )
       check('L2 返回列表成功', backToList)
+
+      // 焦点要还给「刚才打开的那张卡」——从哪来回哪去
+      const focusAfterBack = await evaluate(
+        cdp,
+        `(() => {
+          const sr = document.querySelector('forge-notes').shadowRoot
+          const a = sr.activeElement
+          return {
+            isCardBtn: !!(a && a.classList && a.classList.contains('fn-card-btn')),
+            slug: a && a.dataset ? a.dataset.slug : '',
+          }
+        })()`,
+      )
+      check(
+        'L2 返回列表后焦点回到原卡片',
+        focusAfterBack.isCardBtn,
+        `active=${focusAfterBack.slug || '(不是卡片按钮)'}`,
+      )
 
       // 交互：搜索过滤
       const beforeSearch = shadowInfo.cards
@@ -512,12 +861,94 @@ async function main() {
       )
       check('L2 标签筛选生效', afterTag >= 1 && afterTag < beforeSearch, `cards=${afterTag}`)
 
+      // 筛选栏要有分组语义，读屏才知道这一排按钮是干什么的
+      const tagbarA11y = await evaluate(
+        cdp,
+        `(() => {
+          const tb = document.querySelector('forge-notes').shadowRoot.querySelector('.fn-tagbar')
+          return { role: tb ? tb.getAttribute('role') : '', label: tb ? tb.getAttribute('aria-label') : '' }
+        })()`,
+      )
+      check(
+        'L2 标签栏有分组语义',
+        tagbarA11y.role === 'group' && !!tagbarA11y.label,
+        `role=${tagbarA11y.role} label=${tagbarA11y.label}`,
+      )
+
+      // 筛选结果播报区（只给读屏用，视觉上 1px 隐藏）
+      const liveRegion = await evaluate(
+        cdp,
+        `(() => {
+          const el = document.querySelector('forge-notes').shadowRoot.querySelector('.fn-vh')
+          return { exists: !!el, role: el ? el.getAttribute('role') : '', text: el ? el.innerText : '' }
+        })()`,
+      )
+      check(
+        'L2 有筛选结果播报区',
+        liveRegion.exists && liveRegion.role === 'status' && /筛选后共 \d+ 篇/.test(liveRegion.text),
+        `role=${liveRegion.role} text="${liveRegion.text}"`,
+      )
+
+      /*
+       * 属性映射：Web Component 的 kebab-case 属性要能落到 camelCase props 上。
+       *
+       * README 承诺了 `per-page` / `show-tags` 这种写法，但 Vue 对自定义元素
+       * 的属性→props 映射（含 Number / Boolean 的类型转换）是运行时行为，
+       * 不是文档保证。这里新建一个实例量真实结果，把这条承诺钉住。
+       */
+      const attrMapping = await evaluate(
+        cdp,
+        `(async () => {
+          const el = document.createElement('forge-notes')
+          el.setAttribute('per-page', '3')
+          el.setAttribute('show-tags', 'false')
+          document.body.appendChild(el)
+          await new Promise((r) => setTimeout(r, 1000))
+          const sr = el.shadowRoot
+          const res = {
+            hasShadow: !!sr,
+            cards: sr ? sr.querySelectorAll('.fn-card').length : -1,
+            tagbar: sr ? !!sr.querySelector('.fn-tagbar') : null,
+            moreText: sr && sr.querySelector('.fn-more') ? sr.querySelector('.fn-more').innerText : '',
+          }
+          el.remove()
+          return res
+        })()`,
+      )
+      check('L2 新建实例渲染成功', attrMapping.hasShadow && attrMapping.cards > 0, `cards=${attrMapping.cards}`)
+      check(
+        'L2 kebab-case 属性 + Number 转换生效（per-page="3"）',
+        attrMapping.cards === 3,
+        `cards=${attrMapping.cards}`,
+      )
+      check(
+        'L2 kebab-case 属性 + Boolean 转换生效（show-tags="false"）',
+        attrMapping.tagbar === false,
+        `tagbar=${attrMapping.tagbar}`,
+      )
+      check(
+        'L2 per-page 生效后出现「加载更多」',
+        /加载更多/.test(attrMapping.moreText || ''),
+        attrMapping.moreText.slice(0, 40),
+      )
+
       /* ---------------- 控制台错误 ---------------- */
       console.log('\n[控制台]')
       const jsErrors = consoleErrors.filter((e) => e.startsWith('exception:'))
       const logErrors = consoleErrors.filter((e) => e.startsWith('log:'))
       check('无 JS 运行时异常', jsErrors.length === 0, jsErrors.join(' ; '))
-      check('无控制台 error 级日志', logErrors.length === 0, logErrors.join(' ; ').slice(0, 300))
+
+      // 排除 L1-5 故意触发的那个 404：它是被测行为，不是缺陷。
+      // 剩下的任何一条都算失败 —— 这样这条断言才真的在看东西。
+      const unexpectedLogs = logErrors.filter((e) => !e.includes(EXPECTED_404_PATH))
+      check(
+        `无预期外的控制台 error 级日志（已排除 L1-5 故意访问的 ${EXPECTED_404_PATH}）`,
+        unexpectedLogs.length === 0,
+        unexpectedLogs.join(' ; ').slice(0, 300),
+      )
+      if (logErrors.length !== unexpectedLogs.length) {
+        console.log(`        （另有 ${logErrors.length - unexpectedLogs.length} 条来自 L1-5 的预期 404，已排除）`)
+      }
     }
 
     /* ---------------- 汇总 ---------------- */

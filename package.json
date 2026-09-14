@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vitepress dev docs",
     "build": "npm run build:site && npm run build:embed",
-    "build:site": "vitepress build docs",
+    "build:site": "vitepress build docs && node scripts/localize-theme-aria.mjs",
     "build:content": "node scripts/build-embed-content.mjs",
     "build:embed": "npm run build:content && vite build --config packages/embed/vite.config.js",
     "preview": "vitepress preview docs"

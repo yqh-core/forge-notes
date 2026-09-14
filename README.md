@@ -84,9 +84,14 @@ export const site = {
   heroActions: [...],         // hero 按钮
   highlights: [...],          // 首页特性卡片
   footer: {...},              // 页脚（copyright 用 SITE_NAME 常量拼接，保证改名跟随）
+  ui: {                       // 内置英文 UI 的本地化（搜索、404、跳到正文）
+    skipToContent: '跳到正文',
+    search: {...},            // 搜索按钮 + 弹窗文案；键名逐一对照 VitePress 源码，见踩坑 16
+    notFound: {...},          // 404 页文案（VitePress 自动生成 404.html，不需自建文件）
+  },
   features: {                 // 功能开关
     search: true,
-    lastUpdated: true,        // 依赖 .git；无 git 时自动关闭并打印告警
+    lastUpdated: true,        // 日期取文章 front matter 的 date，不是 git；无 .git 时整体关闭（见踩坑 15）
     sidebar: true,
     cleanUrls: true,          // 生成不带 .html 的干净链接（Cloudflare Pages 必须开，原因见踩坑 12）
     editLinkRepo: '',         // 留空即关闭「编辑此页」，避免 your-repo 死链
@@ -121,6 +126,16 @@ export const site = {
 > **`VITE_OUT_DIR` 的用处**：让多次构建各写各的目录、互不覆盖。
 > 配合 `VITE_BASE` / `VITE_SITE_URL` 可以一次跑出多套产物（例如同时产出 `base=/` 与 `base=/blog/` 两版），
 > 验证脚本就是靠它做到「6 次不同配置的构建彼此不干扰」。
+
+### 「最后更新于」取哪个日期
+
+取**文章 front matter 的 `date`**，不是 git 提交时间：
+
+- 有 `date` 的文章页显示「最后更新于 <日期>」，只到天，不显示时分秒；
+- 没有 `date` 的页面（首页 / 关于 / 文章列表）**不显示这一行** —— 宁可不显示，也不编造一个日期；
+- `sitemap.xml` 里每条 `lastmod` 同样取自对应文章的 `date`，无 `date` 的条目直接省略 `lastmod`。
+
+这么改的原因见踩坑 15：用 git 时间戳时，Cloudflare 的浅克隆会让**全站**日期都变成「这次部署的时间」。
 
 ### 新增文章
 
@@ -258,6 +273,24 @@ forge-notes {
 | `initial-slug` | String | `''` | 直接打开指定文章 |
 | `theme` | String | `'auto'` | `auto` / `light` / `dark` |
 
+#### Boolean 属性怎么写（Web Component 场景必读）
+
+当 `<forge-notes>` 作为原生自定义元素使用时，Boolean 属性按 **HTML 惯例**写：
+
+```html
+<forge-notes show-tags="false">   <!-- 关掉标签栏 -->
+<forge-notes show-tags>           <!-- 打开标签栏（空 attribute = true） -->
+```
+
+`"false"` / `"0"` / `"no"` / `"off"`（忽略大小写与首尾空格）都算 **false**；
+空 attribute 按 HTML 惯例算 **true**。命令式挂载时直接传真正的布尔值即可。
+
+> 为什么专门说明：Vue 的 `defineCustomElement` **只对 Number 型** props 做「属性字符串 → 值」的
+> 转换（源码见 `@vue/runtime-dom` 的 `_numberProps`），Boolean 型拿到的是**原始字符串**。
+> 不处理的话 `="false"` 会被当成真值、标签栏反而显示出来，而空 attribute 又会被当成假值
+> ——两种写法都跟直觉相反。组件在内部做了一次归一化（`ForgeNotes.vue` 的 `normalizeBool`），
+> 所以上面两种写法都符合预期。`verify.js` 里有对应断言钉住这个行为。
+
 命令式挂载：
 
 ```js
@@ -346,6 +379,32 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
 
 **需要完整功能就用 L1 独立站点；需要嵌进别人网站就用 L2 组件；两者可以同时部署。**
 
+## 无障碍与本地化
+
+站点是中文的，所以内置的英文 UI 文案都已本地化（文案集中在 `site.config.mjs` 的 `ui` 块）。
+
+| 位置 | 处理方式 |
+|---|---|
+| 导航栏搜索按钮 / 输入框 placeholder / 搜索弹窗全套 | `search.options.locales.root.translations` |
+| 404 页（标题、说明、回首页链接） | `themeConfig.notFound` |
+| 键盘「跳到正文」链接 | `themeConfig.skipToContentLabel` |
+| 上一篇 / 下一篇、本页目录、回到顶部、主题切换、侧栏菜单 | `docFooter` / `outline.label` / `returnToTopLabel` / `darkModeSwitch*` / `sidebarMenuLabel` |
+| 正文日期 | 锁定 UTC + 跟随站点语言（否则 UTC-5 的访客会看到前一天） |
+| **主题里写死的** `Main Navigation` / `Sidebar Navigation` / `toggle section` | `scripts/localize-theme-aria.mjs`（构建后替换 HTML **和** theme JS，见踩坑 17） |
+
+> 最后一行没有官方开关可用 —— `2.0.0-alpha.15` 的主题产物里根本没有读取
+> `navMenuLabel` / `mobileMenuLabel` / `extraMenuLabel` 这几个官方文档提到的键（实测 grep 确认）。
+> 这三条 aria 文案都是 `visually-hidden` 的：普通访客看不见，但读屏用户会听到，
+> 中文站点读出 "Main Navigation" 是真实的无障碍缺陷，所以用构建后替换补上了。
+
+嵌入组件（L2）这边：
+
+- 文章卡片是**真实 `<button>`**（放在 `<h3>` 里），Tab 可聚焦、回车可打开。
+  早期写成 `<li @click>` —— 鼠标能用，但键盘与读屏用户根本打不开文章；
+- 用 `::after` 把按钮命中区拉伸到整张卡，「整卡可点」的手感没有丢；
+- 列表 ↔ 详情切换时管理焦点：进详情把焦点移到「返回列表」，返回时还给原来那张卡；
+- 筛选结果用 `role="status"` 区域播报给读屏；尊重系统的「减弱动态效果」设置。
+
 ## 踩坑记录
 
 改造过程中遇到并已修复的问题，记录于此以免重蹈：
@@ -399,6 +458,8 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
     而且构建照样成功、不报任何错。
     *这个 bug 是在给它加 `VITE_OUT_DIR` 时暴露的 —— 产物被写到了项目外的 `D:\work\tools\`，
     才发现根目录算错了。*
+    （「最后更新于」后来改用文章 front matter 的 `date` 驱动，不再依赖 `.git` 是否存在，
+    见踩坑 15；但这段「路径层级算错会静默改变行为」的教训仍然成立。）
 
 11. **`outDir` 指到 `docs/` 之外时，Vite 不会清空它。**
     这是官方行为（只打一行 warning），本项目的验证脚本正是靠它做到
@@ -459,13 +520,167 @@ bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
    *教训：部署平台的 URL 规范化行为要用真实响应码验一遍。只跑本地 `vitepress preview`
    永远看不到 308 —— 本地预览服务器不吃 `.html` 那一套。*
 
+15. **Cloudflare 的浅克隆，会让「最后更新于」与 sitemap 的 `lastmod` 全站都变成「这次部署的时间」。**
+    VitePress 构建期只跑**一次** `git log --name-only` 扫描 `docs/`，建立
+    「文件 → 最新提交时间」映射（见 `dist/node` 里的 `cacheAllGitTimestamps`）。
+    而 Cloudflare Pages 检出的是**浅克隆**：唯一可见的那个提交（边界提交）
+    会被 git 当成「新增了全部文件」，于是仓库里**每个**文件都映射到它。
+
+    同一个仓库、同一份内容，两处构建量到的结果：
+
+    | 构建位置 | 全站日期 | 实际含义 |
+    |---|---|---|
+    | 本地（全量历史） | `2026-09-14T06:52:47Z` | 初始提交，**正确** —— 所有 `.md` 确实只在那次提交里改过 |
+    | Cloudflare | `2026-09-14T07:44:33Z` | 当时的 tip 提交；而**那次提交只改了 README 与两个 `.mjs`，没碰过任何文章** |
+
+    线上实测：`sitemap.xml` 里 20 条 `lastmod` **全部是同一个值**，19 个页面也全都显示同一天。
+    后果不只是「不准」：每推一次代码，17 篇文章都会对外宣称「今天刚更新」。
+
+    修法是换数据源 —— 改用文章自带的 `date`：
+
+    - 页面侧：在 `transformPageData` 里覆盖 `pageData.lastUpdated`。
+      VitePress 是**先**算好 `lastUpdated`、**再**调用 `transformPageData` 并 merge 返回值，
+      所以这里能覆盖（顺序抄自 `dist/node` 的 `createMarkdownToVueRenderFn`）；
+    - sitemap 侧：用官方的 `sitemap.transformItems` 重写 `lastmod`，
+      没有 `date` 的条目直接删掉该字段 —— 与其给搜索引擎一个编造的日期，不如不给。
+
+    顺带的好处：构建不再依赖 git 历史，本地与 CI 的产物完全一致。
+
+    *教训：只在本地跑得通的「正确」，在 CI 上可能是另一个答案。两边都量一遍再下结论。*
+
+16. **本地化键名写错是静默失效；而且官方文档描述的版本可能比你装的新。**
+    中文站点上曾残留一整套英文 UI：导航栏的 `Search`、输入框 placeholder、
+    弹窗里的 `Reset search` / `No results found`。修法是官方文档给的
+    `themeConfig.search.options.locales.root.translations`（单语言站点挂在 `root` 下）。
+
+    两个坑：
+
+    - **键名必须逐一对照源码**。`VPLocalSearchBox.vue` 只读
+      `modal.displayDetails` / `resetButtonTitle` / `backButtonTitle` / `noResultsText`
+      与 `modal.footer.*` 这一组键，写错任何一个都是**静默无效果** —— 不报错、不告警。
+      所以 `verify.js` 里不是去 grep 配置文件，而是真的把弹窗打开、真的输入一个搜不到的词，
+      量它渲染出来的文案。
+    - **官方文档超前于已发布版本**。文档里有 `navMenuLabel` / `mobileMenuLabel` / `extraMenuLabel`，
+      但 `2.0.0-alpha.15` 的主题产物里 grep 不到这几个键，写了就是空操作。
+      用之前先在 `node_modules/vitepress` 里确认一次，别照着文档写完就以为生效了。
+
+    顺便修掉一个顺序问题：`code`/`span` 之类的元素在 `<button>` 里合法，
+    但 `<h3>`/`<p>` 不行 —— 所以卡片是「`<h3>` 里放 `<button>`，按钮只包标题文字」，
+    而不是把整张卡的内容塞进按钮。
+
+17. **只改产物 HTML 不改 theme JS，中文会在 hydration 之后被覆盖回英文。**
+
+    踩坑 16 最后剩了三条纹丝不动的英文：`Main Navigation` / `Sidebar Navigation` /
+    `toggle section`。它们是主题组件里的**字面量**，`2.0.0-alpha.15` 没有任何配置键能改，
+    于是改用构建后替换（`scripts/localize-theme-aria.mjs`，挂在 `build:site` 之后）。
+
+    第一版只替换了 `.html` —— grep 产物确认「英文没了、中文在」，看着已经修好了。
+    但这是**假修好**：VitePress 是 SSG + hydration，同一个字符串在产物里存在**两份**：
+
+    | 位置 | 形态 |
+    |---|---|
+    | 静态 HTML | `<span id="main-nav-aria-label" ...> Main Navigation </span>` |
+    | `assets/chunks/theme.*.js` | `" Main Navigation "`（渲染函数里的字符串字面量） |
+
+    页面加载后 Vue 会 hydrate。HTML 说中文、JS 说英文，两边对不上，Vue 就按 **JS** 的值
+    修正 DOM —— 中文在首屏一闪之后被换成英文，**不报任何错**。只 grep 静态 HTML 是查不出来的。
+
+    修法：两边一起替换。验证方式也跟着改了：`verify.js` 不再 grep 产物文件，而是在
+    **真实浏览器、等过 hydration 之后**读
+    `document.getElementById('main-nav-aria-label').textContent`。
+    同一份产物，grep 说「已本地化」、浏览器说「Main Navigation」—— 只有后者算数。
+
+    但「两边一起替换」这一版**又踩了一个更狠的**。JS 侧的正则是连引号一起匹配的
+    （`/" Main Navigation "/`），替换值却写成了裸中文，产物于是变成：
+
+    ```js
+    createElementVNode("span",{id:"main-nav-aria-label",...},主导航,-1)   // ← 少了引号
+    ```
+
+    中文在 JS 里是**合法的标识符字符**，所以 `node --check` **全部通过**（45 个文件零报错）。
+    可运行时 `主导航` 是个未定义变量 → 渲染抛 `ReferenceError` → **整个导航栏菜单子树不渲染**，
+    导航栏空白。静态检查全绿、页面白给 —— 而且只影响这一个子树，首页其余部分照常，
+    很容易被当成「样式问题」放过去。
+
+    是浏览器断言把它拦下来的：`.VPNavBarMenu` 取到 `null`、`aria 标题` 读到空串。
+    只做 grep / 语法检查的验证流水线会一路放行到线上。
+
+    两处加固：
+
+    - 替换值统一用 `JSON.stringify` 生成带引号的字面量，规则表里只写裸文案，不再手写引号；
+    - 加了一条**引号数量不变**的不变式 —— JS 补丁前后双引号计数必须相等，
+      不等就直接中止构建。宁可构建失败，也不要把「静态检查全绿、运行时报错」的产物发出去。
+
+    *教训：`node --check` 只证明「这是合法语法」，不证明「这是对的代码」。
+    SSG 站点的「产物对了」和「运行时对了」是两件事 —— 涉及客户端会接管的节点，
+    断言必须放在 hydration 之后的真实 DOM 上；而涉及编译产物的字符串手术，
+    要加一条能被机械校验的不变式，别依赖肉眼 grep。*
+
+18. **验证脚本被打断，会把探针值留在配置文件里，让下一次运行假绿。**
+
+    `verify-config.sh` 靠「改 `site.config.mjs` → 重建 → 断言」来验证单一配置源，
+    收尾时会把文件还原回去。但它没防住**中途被打断**：一次前台超时把它 SIGTERM 掉，
+    探针值 `ZZ-CONFIG-PROBE` 就留在了 `site.config.mjs` 里。
+
+    后果不是「多跑一次就好」，而是下一次运行会**更难读懂**：
+
+    - 它把这份脏文件当成了备份，`sed` 于是匹配不到原文（原文已被改掉）——
+      但「文件里含 `ZZ-CONFIG-PROBE`」这条 grep 断言**照样通过**，探针 1 误报 PASS；
+    - 收尾「还原」把脏文件又拷了回去，最后两条 `assert_hasnt` 失败，
+      表现为一个费解的「还原后仍有探针残留」。
+
+    两处修复：
+
+    - `trap restore_config EXIT INT TERM` —— 无论怎么退出都还原，
+      「被打断」和「正常结束」走同一条路径；
+    - **前置条件检查**：开跑前先确认文件是原始的 `const SITE_NAME = 'Forge Notes'`，
+      不是就直接中止并告诉用户执行 `git checkout -- site.config.mjs`。
+      与其在下游看到两个看不懂的红灯，不如在第一时间停下来说清楚。
+
+    *教训：会自动改用户文件的脚本，「被打断」也必须是一条被处理过的路径。
+    顺带：被打断时**不要**用 `git checkout --` 去恢复 —— 仓库里可能还有没提交的改动，
+    那次我就连带把 `ui` 配置块一起回滚了。先看 `git status`。*
+
+19. **Web Component 的 Boolean 属性：`="false"` 反而是真值，空 attribute 反而是假值。**
+
+    给嵌入组件写文档时承诺了 `<forge-notes show-tags="false">` 这种写法，
+    于是加了一条断言去钉它 —— 结果 `tagbar=true`，标签栏照样显示出来。
+
+    去翻 Vue 源码才明白：`defineCustomElement` 的 `_setAttr` **只判断 `_numberProps`**
+    （Number 型），Boolean 型拿到的是**原始字符串**。于是：
+
+    | 写法 | props.showTags 实得 | 直觉期望 | 结果 |
+    |---|---|---|---|
+    | `show-tags="false"` | `"false"`（真值字符串） | 隐藏 | ❌ 显示 |
+    | `show-tags`（空 attribute） | `""`（假值） | 显示 | ❌ 隐藏 |
+
+    两种都反着来，而且是**用户的写法错、组件默默照做** —— 这类坑最难被发现，
+    因为没有任何报错，只是「设了没用」或「设了反效果」。
+
+    修法不是改断言去迁就现状，而是在组件边界做归一化（`ForgeNotes.vue` 的 `normalizeBool`）：
+    空 attribute 按 HTML 惯例算 true，`"false"/"0"/"no"/"off"` 算 false。
+    顺带用 `normalizeCount` 兜住 `per-page="abc"`（NaN）和 `per-page="-1"` 这类非法数字。
+
+    *教训：面向使用者的 API，「我认为这个写法应该怎样」不算数，
+    「用户真的这么写会发生什么」才算数。断言要写成**用户视角的期望**，
+    跑红的时候先怀疑实现，而不是先改断言。*
+
+    附带发现两条断言本身的问题，一并修了：
+
+    - `document.querySelector('.VPNavBarMenu').getAttribute(...)` 在元素不存在时**抛异常**，
+      导致**整轮剩余几十条断言全部不跑**。断言工具自己出错只该算这一条失败 ——
+      已经改成 null-safe 并返回诊断信息。
+    - 「无控制台 error」把 **L1-5 故意访问的那个 404** 也算成了缺陷，于是永远红着。
+      已改成记录来源 URL、排除预期内的 404，并把排除数量打印出来 ——
+      一条永远红的断言等于没有断言，而且会训练所有人忽略它。
+
 ## 关键命令速查
 
 ```bash
 npm install                  # 安装全部依赖（含 workspace）
 npm run dev                  # 启动独立站点（默认 http://localhost:5173）
 npm run build                # 构建站点 + 嵌入组件
-npm run build:site           # 只构建独立站点
+npm run build:site           # 只构建独立站点（末尾会自动跑主题 aria 文案本地化）
 npm run build:embed          # 只构建嵌入组件
 npm run build:content        # 只重新生成嵌入组件的内容数据
 npm run preview              # 预览构建后的站点

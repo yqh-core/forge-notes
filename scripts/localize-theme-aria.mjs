@@ -1,0 +1,251 @@
+/**
+ * scripts/localize-theme-aria.mjs —— 把主题里**写死的**英文 aria 文案换成中文
+ *
+ * ── 为什么要这么绕 ────────────────────────────────────────────────
+ * VitePress 默认主题有三处英文文案是**字面量写死在组件里**的，`2.0.0-alpha.15`
+ * 没有提供任何 themeConfig 开关能改它们（实测 grep 整个 theme-default 目录，
+ * `navMenuLabel` / `mobileMenuLabel` / `extraMenuLabel` 这些官方文档提到的键
+ * 在本版本的主题产物里根本没有被读取）：
+ *
+ *   VPNavBarMenu.vue   <span id="main-nav-aria-label">Main Navigation</span>
+ *   VPSidebar.vue      <span id="sidebar-aria-label">Sidebar Navigation</span>
+ *   VPSidebarItem.vue  <div role="button" aria-label="toggle section">
+ *
+ * 这三条都是 `visually-hidden` 的：普通访客看不见，但**读屏用户会听到**。
+ * 中文站点读出 "Main Navigation" 是真实的无障碍缺陷，不是洁癖。
+ *
+ * 既然没有配置开关，就在构建完成后对产物做一次精确替换。
+ * 文案仍然取自 site.config.mjs（ui.hardcodedAria），维持「单一配置源」约束 ——
+ * 这个脚本里不出现任何可改的品牌文案。
+ *
+ * ── 为什么必须同时改 HTML 和 JS（重要）────────────────────────────
+ * 同一个字符串在产物里出现**两次**，位置不同、必须都改：
+ *
+ *   1. 静态 HTML：SSG 渲染出的 <span ...> Main Navigation </span>
+ *   2. theme.*.js：组件编译后的渲染函数里的字符串字面量 " Main Navigation "
+ *
+ * 只改 HTML 是不够的 —— 页面加载后 Vue 会做 hydration。若 HTML 说中文、
+ * JS 说英文，两者对不上，Vue 会按 JS 的值修正 DOM，中文被覆盖回英文。
+ * 也就是说「只改 HTML」的版本在首屏看似正确、**hydration 之后就变回英文**，
+ * 而且不会有任何报错。所以两边一起改，让 hydration 前后完全一致。
+ *
+ * ── 为什么不做成 Vite 插件 ────────────────────────────────────────
+ * VitePress 的页面落盘发生在 vite build **之后**（它先跑完 rollup 再渲染写盘），
+ * 所以插件的 closeBundle 钩子执行时 HTML 还没生成，挂在那里会静默不生效。
+ * 挂在 build:site 之后当独立步骤，顺序是确定的。
+ *
+ * ── 失效保护 ──────────────────────────────────────────────────────
+ * 上游改文案是可能的（升级 VitePress 时）。届时替换会匹配不到 —— 那正是
+ * 「静默失效」的经典场景。所以这里对每条规则统计命中数：
+ *   - 英文在、中文不在   → 执行替换
+ *   - 中文已在、英文不在 → 已本地化，静默通过（保证脚本可重复执行）
+ *   - 两者都不在         → required:true 的规则**告警**；required:false 的只提示
+ * 告警不中断构建：aria 文案是装饰性缺陷，不值得让一次正常部署失败。
+ * 真正的把关交给验证脚本 —— tools/verify/verify-config.sh 与 verify.js
+ * 都断言了「中文在、英文不在」，且 verify.js 是在**真实浏览器 hydration 之后**
+ * 读的 DOM，能抓到「只改了 HTML、被 hydration 覆盖回去」这种半成品状态。
+ */
+
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { site } from '../site.config.mjs'
+
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+// 与 docs/.vitepress/config.mjs 保持完全相同的解析规则：
+// 有 VITE_OUT_DIR 就用它（验证脚本靠这个让多次构建各写各的目录），
+// 否则用 VitePress 默认产物目录。
+const outDir = process.env.VITE_OUT_DIR
+  ? path.resolve(projectRoot, process.env.VITE_OUT_DIR)
+  : path.join(projectRoot, 'docs/.vitepress/dist')
+
+const aria = site.ui.hardcodedAria
+
+/**
+ * 替换规则：每条同时给出 HTML 形态与 JS 形态的匹配式。
+ *
+ * 用正则而不是固定字符串，是因为两边的空白处理不同：
+ *   - HTML：Vue 模板编译把 span 内的换行缩进压成**单个空格** → "> Main Navigation <"
+ *   - JS  ：渲染函数里的字符串字面量保留**首尾空格**       → "\" Main Navigation \""
+ * 用 \s* 把两种形态一起兜住，升级后压法变了也不至于失效。
+ *
+ * ⚠️ `chinese` 一律写**裸文案**（不带引号）：HTML 分支直接用，
+ * JS 分支由代码统一 JSON.stringify 补引号。手写引号是上面那个
+ * 「`},主导航,-1)`」事故的来源，不要再那么干。
+ */
+const RULES = [
+  {
+    key: 'mainNav',
+    label: '主导航（导航栏 aria-labelledby 目标）',
+    source: 'VPNavBarMenu.vue',
+    chinese: aria.mainNav,
+    /** 判断「已本地化」用的裸中文串，见下方 already 逻辑 */
+    probe: aria.mainNav,
+    english: 'Main Navigation',
+    htmlMatch: /(?<=main-nav-aria-label[^>]*>)\s*Main Navigation\s*(?=<\/span>)/g,
+    jsMatch: /"\s*Main Navigation\s*"/g,
+    required: true,
+  },
+  {
+    key: 'sidebarNav',
+    label: '侧边栏导航（侧栏 aria-labelledby 目标）',
+    source: 'VPSidebar.vue',
+    chinese: aria.sidebarNav,
+    probe: aria.sidebarNav,
+    english: 'Sidebar Navigation',
+    htmlMatch: /(?<=sidebar-aria-label[^>]*>)\s*Sidebar Navigation\s*(?=<\/span>)/g,
+    jsMatch: /"\s*Sidebar Navigation\s*"/g,
+    required: true,
+  },
+  {
+    key: 'toggleSection',
+    label: '分组折叠按钮（caret 的 aria-label）',
+    source: 'VPSidebarItem.vue',
+    chinese: `aria-label="${aria.toggleSection}"`,
+    probe: aria.toggleSection,
+    english: 'toggle section',
+    htmlMatch: /aria-label="toggle section"/g,
+    // JS 里是对象字面量的值：role:"button","aria-label":"toggle section"
+    jsMatch: /"aria-label"\s*:\s*"toggle section"/g,
+    jsReplacer: () => `"aria-label":"${aria.toggleSection}"`,
+    // 只在「分组设了 collapsed 且含子项」时才渲染。本站侧边栏目前没有可折叠组，
+    // 所以 HTML 里命中数为 0 是正常的，不能算异常（但 JS 里始终存在这个字面量）。
+    required: false,
+  },
+]
+
+/** 递归收集 outDir 下所有目标文件 */
+function collect(dir, exts, acc = []) {
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return acc
+  }
+  for (const e of entries) {
+    const full = path.join(dir, e.name)
+    if (e.isDirectory()) collect(full, exts, acc)
+    else if (e.isFile() && exts.some((x) => e.name.endsWith(x))) acc.push(full)
+  }
+  return acc
+}
+
+function main() {
+  if (!fs.existsSync(outDir)) {
+    console.error(`[localize-aria] 产物目录不存在：${outDir}`)
+    console.error('[localize-aria] 请确认先跑过 build:site（本脚本必须在其之后执行）')
+    process.exit(1)
+  }
+
+  // JS 只扫产物根下的 assets/：站点自己的业务代码里不该出现这几个主题字面量，
+  // 限制范围可以避免误伤（例如文章正文里恰好有 "toggle section" 这种词）。
+  const htmlFiles = collect(outDir, ['.html'])
+  const assetsDir = path.join(outDir, 'assets')
+  const jsFiles = fs.existsSync(assetsDir) ? collect(assetsDir, ['.js']) : []
+  const files = [...htmlFiles, ...jsFiles]
+
+  const replaced = new Map(RULES.map((r) => [r.key, { n: 0, files: 0 }]))
+  const already = new Map(RULES.map((r) => [r.key, 0]))
+
+  for (const file of files) {
+    const isJs = file.endsWith('.js') && file.startsWith(assetsDir)
+    const original = fs.readFileSync(file, 'utf8')
+    let next = original
+
+    for (const rule of RULES) {
+      const match = isJs ? rule.jsMatch : rule.htmlMatch
+      if (!match) continue
+
+      // ⚠️ JS 侧的替换值必须**带引号**。
+      //
+      // 这里踩过一个要命的坑：jsMatch 是连引号一起匹配的（/" Main Navigation "/），
+      // 但替换值当时给的是裸中文 → 产物里变成 `},主导航,-1)`。
+      // 中文在 JS 里是**合法的标识符字符**，所以 `node --check` **照样通过**；
+      // 运行时它是个未定义变量 → 渲染抛 ReferenceError → 整个导航栏子树崩掉。
+      // 静态检查全绿、页面白给 —— 典型的「语法对了不等于语义对了」。
+      //
+      // 所以非 HTML 分支统一用 JSON.stringify 生成带引号的字面量，
+      // 规则表里只写裸文案，不再手写引号。
+      const replacement = isJs
+        ? rule.jsReplacer
+          ? rule.jsReplacer()
+          : JSON.stringify(rule.chinese)
+        : rule.chinese
+
+      // 中文已就位 → 上次已处理过，跳过（保证脚本可重复执行）。
+      // 探针用**裸中文串**而不是完整替换文本：HTML 侧是 `aria-label="展开或收起分组"`、
+      // JS 侧是 `"aria-label":"展开或收起分组"`，只有裸串对两种形态都成立。
+      if (next.includes(rule.probe)) {
+        already.set(rule.key, already.get(rule.key) + 1)
+        continue
+      }
+
+      match.lastIndex = 0
+      const found = next.match(match)
+      if (!found || found.length === 0) continue
+
+      match.lastIndex = 0
+      next = next.replace(match, replacement)
+      const s = replaced.get(rule.key)
+      s.n += found.length
+      s.files += 1
+    }
+
+    /*
+     * JS 补丁的安全不变式：替换只换字符串**内容**，不该改变双引号的数量。
+     *
+     * 这条是被上面那个 bug 逼出来的。少一个引号 = 字符串字面量退化成裸标识符；
+     * 中文是合法的 JS 标识符字符，所以 `node --check` 查不出来，
+     * 只有真正渲染到那个组件时才会抛 ReferenceError。
+     * 与其指望下次也恰好被浏览器测试逮住，不如在这里直接卡死：宁可构建失败，
+     * 也不要把一个「静态检查全绿、运行时白屏」的产物发出去。
+     */
+    if (isJs && next !== original) {
+      const before = (original.match(/"/g) || []).length
+      const after = (next.match(/"/g) || []).length
+      if (before !== after) {
+        console.error(
+          `[localize-aria] ✗ 中止：引号数量被改变（${before} → ${after}）\n` +
+            `      文件：${path.relative(projectRoot, file)}\n` +
+            '      替换破坏了字符串字面量，产物在运行时会抛 ReferenceError。本次未写入。',
+        )
+        process.exit(1)
+      }
+    }
+
+    if (next !== original) fs.writeFileSync(file, next)
+  }
+
+  // ---------------- 结果汇报 ----------------
+  console.log(
+    `[localize-aria] 扫描 ${htmlFiles.length} 个 HTML + ${jsFiles.length} 个 JS` +
+      `（${path.relative(projectRoot, outDir)}）`,
+  )
+
+  let warned = 0
+  for (const rule of RULES) {
+    const s = replaced.get(rule.key)
+    const done = already.get(rule.key)
+    if (s.n > 0) {
+      console.log(`  ✅ ${rule.label}：替换 ${s.n} 处 / ${s.files} 个文件 → 「${aria[rule.key]}」`)
+    } else if (done > 0) {
+      console.log(`  ✅ ${rule.label}：已本地化（${done} 个文件命中文案，无需改动）`)
+    } else if (rule.required) {
+      warned += 1
+      console.warn(
+        `  ⚠️  ${rule.label}：**没有匹配到**「${rule.english}」。\n` +
+          `      主题源码是 ${rule.source}，上游可能改了文案 —— 请核对后更新本脚本的匹配式。\n` +
+          `      （当前站点上这条 aria 文案会残留英文，读屏用户仍会听到英文。）`,
+      )
+    } else {
+      console.log(`  ○  ${rule.label}：HTML 中未出现（该元素在本站不渲染，属正常）`)
+    }
+  }
+
+  console.log(warned > 0 ? `[localize-aria] 完成，但有 ${warned} 条规则未命中 —— 见上面的 ⚠️` : '[localize-aria] 完成')
+  // 刻意不因告警而失败：aria 文案是装饰性缺陷，不该阻断部署。
+  // 回归拦截由 tools/verify 里的断言负责。
+}
+
+main()

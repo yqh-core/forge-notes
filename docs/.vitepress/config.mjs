@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitepress'
 import { site } from '../../site.config.mjs'
 import { createSidebar } from './sidebar.mjs'
+import { loadPosts } from '../../scripts/lib/posts.mjs'
 
 const dirname = path.dirname(fileURLToPath(import.meta.url))
 // dirname = <项目根>/docs/.vitepress —— 退回两级才是项目根。
@@ -78,18 +79,60 @@ function withBase(p, baseValue) {
   return baseValue.replace(/\/+$/, '') + p
 }
 
+// ==================== 「最后更新于」的数据源 ====================
+/**
+ * 建立「页面 → 时间戳」索引，数据来自文章 front matter 的 `date`。
+ *
+ * ⚠️ 为什么不用 VitePress 默认的 git 提交时间（实测，2026-09-14）：
+ *
+ *   VitePress 在构建期只跑**一次** `git log --name-only` 扫描 srcDir，建立
+ *   「文件 → 最新提交时间」映射（dist/node 里的 cacheAllGitTimestamps）。
+ *   Cloudflare Pages 检出的是**浅克隆**，此时唯一可见的提交（边界提交）
+ *   会被 git 当成「新增了全部文件」，于是每个文件都映射到**这次部署的提交时间**。
+ *
+ *   同一个仓库、同一份内容，两处构建量到的差异：
+ *     本地（全量历史） → 全站 2026-09-14T06:52:47Z（= 初始提交，正确）
+ *     Cloudflare       → 全站 2026-09-14T07:44:33Z（= 当时的 tip 提交）
+ *   而那个 tip 提交只改了 README 与两个 .mjs，**没碰过任何文章**。
+ *
+ *   后果不只是"不准"：每推一次代码，17 篇文章都会对外宣称"今天刚更新"，
+ *   sitemap 里 20 条 lastmod 也一起变成部署时间（均为线上实测）。
+ *
+ * 换成文章自带的 date 之后：日期由内容决定、与检出方式无关，
+ * 本地与 CI 的产物完全一致，也不再需要 git 才能算出正确的日期。
+ *
+ * @returns {Map<string, number>} relativePath（如 posts/welcome.md）→ 时间戳
+ */
+function buildPostDateIndex() {
+  const index = new Map()
+  for (const post of loadPosts(projectRoot, site.content.postsDir)) {
+    const ts = Date.parse(post.date)
+    if (!Number.isFinite(ts)) continue
+    // post.url 形如 /posts/welcome（不含 base），转成相对 srcDir 的 md 路径
+    index.set(`${post.url.replace(/^\//, '')}.md`, ts)
+  }
+  return index
+}
+
+const postDateIndex = buildPostDateIndex()
+
 // ==================== 环境自检 ====================
 /**
- * 「最后更新于」依赖 git 提交记录。没有 .git 时 VitePress 拿不到时间，
- * 既不会报错、也不会显示 —— 静默失效最容易让人以为是配置写错了。
- * 这里主动检测并提示，同时自动关闭该功能，避免页面上出现空的更新时间。
+ * 「最后更新于」的**日期值**来自文章 front matter（见上面的 buildPostDateIndex），
+ * 与 git 无关。但 VitePress 有个内部行为要留意：只要 themeConfig.lastUpdated 存在，
+ * 它在 configResolved 阶段就会调用 git（cacheAllGitTimestamps）。没装 git 的环境
+ * 那次调用会直接抛错、构建失败；有 git 但没有 .git 仓库时虽不报错，却拿不到任何时间戳。
+ *
+ * 所以这里仍然保留检测：无 .git 就直接关掉整个功能，而不是让构建在半路挂掉。
  */
 const hasGit = fs.existsSync(path.join(projectRoot, '.git'))
 const lastUpdatedEnabled = site.features.lastUpdated === true
 
 if (lastUpdatedEnabled && !hasGit) {
   console.warn(
-    '\n[forge-notes] 未检测到 .git 目录，「最后更新于」功能已自动关闭。\n' +
+    '\n[forge-notes] 未检测到 .git 目录，「最后更新于」已自动关闭。\n' +
+      '              原因是 VitePress 在启用该功能时会内部调用 git；\n' +
+      '              日期数据本身来自文章 front matter，与 git 无关。\n' +
       '              启用方式：git init && git add . && git commit -m "init"\n',
   )
 }
@@ -113,13 +156,13 @@ if (adsenseClient) {
   ])
 }
 
-// ==================== 首页数据注入 ====================
+// ==================== 页面数据注入 ====================
 /**
- * 把 site.config.mjs 里的品牌数据注入页面 front matter。
+ * 把 site.config.mjs 里的品牌数据注入页面 front matter，并校正「最后更新于」。
  * 这样 docs/index.md 只需维护正文内容，品牌文案不会出现第二份副本
  * —— 这是「单一配置源」在页面层的落地方式。
  */
-function injectHomePageData(pageData, site, siteUrl, cleanUrls) {
+function injectPageData(pageData, site, siteUrl, cleanUrls) {
   pageData.frontmatter.head ??= []
 
   if (pageData.relativePath === 'index.md') {
@@ -143,6 +186,22 @@ function injectHomePageData(pageData, site, siteUrl, cleanUrls) {
 
     pageData.frontmatter.head.push(['link', { rel: 'canonical', href: canonicalUrl }])
   }
+
+  /**
+   * 覆盖「最后更新于」。
+   *
+   * 位置很关键：VitePress 会先算好 pageData.lastUpdated（走 git），
+   * **然后**才调用 transformPageData 并把返回值 merge 进 pageData
+   * （见 dist/node 里 createMarkdownToVueRenderFn 的实现顺序），
+   * 所以在这里赋值确实能覆盖掉上游结果。
+   *
+   * 取不到 date 的页面（首页 / 关于 / 文章列表）显式清成 0：
+   * 主题的 hasLastUpdated 是**真值判断**，0 即整块不渲染。
+   * 必须显式清 —— 不清就会把上游那个（在 CI 里必然失真的）部署时间接着显示出来。
+   */
+  if (lastUpdatedEnabled) {
+    pageData.lastUpdated = postDateIndex.get(pageData.relativePath) || 0
+  }
 }
 
 // ==================== 主题配置 ====================
@@ -159,14 +218,43 @@ const themeConfig = {
   lightModeSwitchTitle: '切换到浅色模式',
   darkModeSwitchTitle: '切换到深色模式',
   externalLinkIcon: true,
+  skipToContentLabel: site.ui.skipToContent,
+  notFound: site.ui.notFound,
 
-  ...(site.features.search && { search: { provider: 'local' } }),
+  /**
+   * 本地搜索（minisearch）。
+   *
+   * translations 挂在 `root` locale 下 —— 这是官方文档给「单语言站点」的做法
+   * （https://vitepress.dev/reference/default-theme-search#i18n）。
+   * 不这么挂，中文站点上会残留一整套英文 UI：导航栏的 Search 按钮与输入框
+   * placeholder，以及弹窗里的 Reset search / No results found / to select 等。
+   */
+  ...(site.features.search && {
+    search: {
+      provider: 'local',
+      options: {
+        locales: { root: { translations: site.ui.search } },
+      },
+    },
+  }),
 
   ...(lastUpdatedEnabled &&
     hasGit && {
       lastUpdated: {
         text: '最后更新于',
-        formatOptions: { dateStyle: 'full', timeStyle: 'medium' },
+        /**
+         * dateStyle 用 long：数据源是**日期粒度**（front matter 的 date），
+         * 带上 timeStyle 会显示出由 YAML 的 UTC 零点换算来的假时间（08:00:00）。
+         *
+         * timeZone: 'UTC' 是必需的：这个字符串由**浏览器端**按访客时区格式化
+         * （VPDocFooterLastUpdated 在 onMounted 里调 Intl.DateTimeFormat），
+         * 不钉 UTC 的话 UTC-5 的访客会把 2025-11-30 看成 2025-11-29 —— 差一天。
+         * 实测：new Date('2025-11-30T00:00:00Z') 在 America/New_York 下格式化为 11月29日。
+         *
+         * forceLocale: true 让日期跟随**站点语言**而非访客浏览器语言，
+         * 否则英文浏览器的访客会在中文页面上看到 "November 30, 2025"。
+         */
+        formatOptions: { dateStyle: 'long', timeZone: 'UTC', forceLocale: true },
       },
     }),
 
@@ -201,11 +289,33 @@ export default defineConfig({
   },
 
   transformPageData(pageData) {
-    injectHomePageData(pageData, site, siteUrl, cleanUrls)
+    injectPageData(pageData, site, siteUrl, cleanUrls)
   },
 
-  // 配置了域名才生成 sitemap，避免产出含空 hostname 的无效文件
-  ...(siteUrl && { sitemap: { hostname: siteUrl } }),
+  /**
+   * 配置了域名才生成 sitemap，避免产出含空 hostname 的无效文件。
+   *
+   * transformItems 用来覆盖 VitePress 用 git 算出来的 lastmod —— 同一个浅克隆问题：
+   * 线上实测 20 条 lastmod 全都是当次部署的提交时间。这里改成文章自己的 date；
+   * 没有 date 的页面（首页 / 关于 / 文章列表）直接把 lastmod 字段删掉：
+   * 与其给搜索引擎一个编造的「今天更新过」，不如不给。
+   */
+  ...(siteUrl && {
+    sitemap: {
+      hostname: siteUrl,
+      transformItems(items) {
+        return items.map((item) => {
+          const key = `${String(item.url).replace(/^\//, '').replace(/\/$/, '')}.md`
+          const ts = postDateIndex.get(key)
+          if (!ts) {
+            const { lastmod, ...rest } = item
+            return rest
+          }
+          return { ...item, lastmod: ts }
+        })
+      },
+    },
+  }),
 
   /**
    * 构建收尾时补一个 robots.txt。

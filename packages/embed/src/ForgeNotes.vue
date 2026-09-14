@@ -9,7 +9,7 @@
  *    这样 Shadow DOM 与普通挂载可以共用同一份样式
  */
 
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import content from './content.generated.json'
 import { site } from '../../../site.config.mjs'
 
@@ -34,11 +34,65 @@ const props = defineProps({
   theme: { type: String, default: 'auto' },
 })
 
+/*
+ * ============================================================================
+ * 属性归一化：Web Component 下 Boolean / Number 属性不能直接信
+ * ============================================================================
+ *
+ * Vue 的 `defineCustomElement` **只对 Number 型** props 做「属性字符串 → 数字」的转换
+ * （源码见 @vue/runtime-dom 的 `_numberProps`，`_setAttr` 里只判断了它）。
+ * Boolean 型拿到的是**原始字符串**，于是 HTML 里两种最自然的写法结果都跟直觉相反：
+ *
+ *   <forge-notes show-tags="false">   → props.showTags === "false"（真值）→ 标签栏**显示**
+ *   <forge-notes show-tags>           → props.showTags === ""     （假值）→ 标签栏**隐藏**
+ *
+ * 用户写 `="false"` 本意是关掉，结果反而打开了 —— 这是纯粹的坑，不该让使用者去背。
+ * 所以在组件边界做一次归一化，让「HTML 属性写法」与「JS 传值写法」表现一致：
+ *
+ *   - 空字符串（`<x show-tags>`）按 HTML 惯例视为 true
+ *   - "false" / "0" / "no" / "off"（不分大小写、忽略首尾空格）视为 false
+ *   - 其余非空字符串视为 true
+ *   - 真正的布尔值按原样
+ *
+ * README 里对外的承诺以这里的语义为准。
+ */
+function normalizeBool(value, fallback) {
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase()
+    if (s === '') return true
+    return !['false', '0', 'no', 'off'].includes(s)
+  }
+  if (value === undefined || value === null) return fallback
+  return value !== false
+}
+
+/**
+ * 数字型属性归一化。
+ *
+ * Number 型虽然会被 Vue 转成数字，但 `per-page="abc"` 会得到 NaN、
+ * `per-page="-1"` 会得到负数 —— 都会让分页算出乱七八糟的切片。
+ * 统一收敛：非法值回落到默认，0 保留（0 = 不分页，见 perPage 的说明）。
+ */
+function normalizeCount(value, fallback) {
+  const n = typeof value === 'string' ? Number(value) : value
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
+const tagsVisible = computed(() => normalizeBool(props.showTags, true))
+const searchVisible = computed(() => normalizeBool(props.searchable, true))
+const hashRouting = computed(() => normalizeBool(props.useHash, false))
+/** 每页文章数；0 表示不分页 */
+const perPageCount = computed(() => normalizeCount(props.perPage, 8))
+/** 标签栏最多显示几个；0 表示全部铺开 */
+const maxTagCount = computed(() => normalizeCount(props.maxTags, 12))
+
 const rootRef = ref(null)
 const keyword = ref('')
 const activeTag = ref('')
 const currentSlug = ref(props.initialSlug)
-const pageSize = ref(props.perPage > 0 ? props.perPage : 0)
+const pageSize = ref(perPageCount.value > 0 ? perPageCount.value : 0)
+/** 记住刚打开过的文章，返回列表时把焦点还给对应的卡片 */
+const lastOpenedSlug = ref('')
 
 const allPosts = content.posts || []
 const displayTitle = computed(() => props.title || site.name)
@@ -66,9 +120,9 @@ const allTags = computed(() => {
 const tagsExpanded = ref(false)
 
 const visibleTags = computed(() =>
-  tagsExpanded.value || props.maxTags <= 0
+  tagsExpanded.value || maxTagCount.value <= 0
     ? allTags.value
-    : allTags.value.slice(0, props.maxTags),
+    : allTags.value.slice(0, maxTagCount.value),
 )
 
 const hiddenTagCount = computed(() =>
@@ -104,28 +158,59 @@ const current = computed(() => allPosts.find((p) => p.slug === currentSlug.value
 
 const themeClass = computed(() => (props.theme === 'auto' ? '' : `fn-theme-${props.theme}`))
 
-function open(post) {
+/**
+ * 打开文章。
+ *
+ * 顺带把焦点移到「返回列表」按钮上：详情视图会把列表整体替换掉，
+ * 原来那个触发按钮已经不在 DOM 里了。不管焦点的话它会掉回 <body>，
+ * 键盘用户得从页首重新 Tab 一遍 —— 这是换视图后最基本的无障碍要求。
+ */
+async function open(post) {
+  lastOpenedSlug.value = post.slug
   currentSlug.value = post.slug
   syncHash()
   scrollToTop()
+  await nextTick()
+  rootRef.value?.querySelector('.fn-back')?.focus()
 }
 
-function back() {
+/**
+ * 返回列表，并把焦点还给「刚才打开的那张卡片」—— 从哪来的回哪去，
+ * 免得用户在 17 张卡里重新找位置。
+ * 找不到时（例如筛选条件变了、那张卡已不在当前结果里）退到搜索框。
+ */
+async function back() {
+  const slug = lastOpenedSlug.value
   currentSlug.value = ''
   syncHash()
   scrollToTop()
+  await nextTick()
+  const card = slug ? rootRef.value?.querySelector(`[data-slug="${slug}"]`) : null
+  const fallback =
+    rootRef.value?.querySelector('.fn-search') || rootRef.value?.querySelector('.fn-list-title')
+  ;(card || fallback)?.focus()
 }
 
 function loadMore() {
-  pageSize.value += props.perPage || 8
+  pageSize.value += perPageCount.value || 8
 }
 
+/**
+ * 滚动到组件顶部。
+ * 平滑滚动对「前庭功能敏感」的用户是负担，所以先看系统设置再决定。
+ */
 function scrollToTop() {
-  rootRef.value?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  const reduce =
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  rootRef.value?.scrollIntoView?.({
+    behavior: reduce ? 'auto' : 'smooth',
+    block: 'start',
+  })
 }
 
 function syncHash() {
-  if (!props.useHash || typeof window === 'undefined') return
+  if (!hashRouting.value || typeof window === 'undefined') return
   const next = currentSlug.value
     ? `#/posts/${encodeURIComponent(currentSlug.value)}`
     : '#/'
@@ -133,25 +218,25 @@ function syncHash() {
 }
 
 function readHash() {
-  if (!props.useHash || typeof window === 'undefined') return
+  if (!hashRouting.value || typeof window === 'undefined') return
   const match = (window.location.hash || '').match(/^#\/posts\/(.+)$/)
   currentSlug.value = match ? decodeURIComponent(match[1]) : props.initialSlug
 }
 
 onMounted(() => {
-  if (!props.useHash) return
+  if (!hashRouting.value) return
   readHash()
   window.addEventListener('hashchange', readHash)
 })
 
 onBeforeUnmount(() => {
-  if (!props.useHash) return
+  if (!hashRouting.value) return
   window.removeEventListener('hashchange', readHash)
 })
 
 // 改变筛选条件时重置分页，避免出现「筛选后列表为空」的错觉
 watch([keyword, activeTag], () => {
-  pageSize.value = props.perPage > 0 ? props.perPage : 0
+  pageSize.value = perPageCount.value > 0 ? perPageCount.value : 0
 })
 
 defineExpose({ open, back, allPosts })
@@ -177,11 +262,17 @@ defineExpose({ open, back, allPosts })
     <!-- ===================== 列表视图 ===================== -->
     <div v-else class="fn-list">
       <header class="fn-header">
-        <h2 class="fn-list-title">{{ displayTitle }}</h2>
+        <!-- tabindex="-1" 让 back() 在找不到原卡片时能把它设为焦点（tabindex=-1 不进 Tab 序列） -->
+        <h2 class="fn-list-title" tabindex="-1">{{ displayTitle }}</h2>
         <p class="fn-list-desc">{{ displayDesc }}</p>
 
+        <!-- 筛选结果播报：只在真的筛选时才播，避免初次加载就朗读 -->
+        <p class="fn-vh" role="status">
+          <template v-if="keyword || activeTag">筛选后共 {{ filtered.length }} 篇文章</template>
+        </p>
+
         <input
-          v-if="searchable"
+          v-if="searchVisible"
           v-model="keyword"
           class="fn-search"
           type="search"
@@ -189,7 +280,12 @@ defineExpose({ open, back, allPosts })
           aria-label="搜索文章"
         />
 
-        <div v-if="showTags && allTags.length" class="fn-tagbar">
+        <div
+          v-if="tagsVisible && allTags.length"
+          class="fn-tagbar"
+          role="group"
+          aria-label="按标签筛选"
+        >
           <button
             type="button"
             class="fn-chip"
@@ -212,6 +308,8 @@ defineExpose({ open, back, allPosts })
             v-if="hiddenTagCount > 0 || tagsExpanded"
             type="button"
             class="fn-chip fn-chip-more"
+            :aria-expanded="tagsExpanded"
+            :aria-label="tagsExpanded ? '收起多余标签' : `展开其余 ${hiddenTagCount} 个标签`"
             @click="tagsExpanded = !tagsExpanded"
           >
             {{ tagsExpanded ? '收起' : `+${hiddenTagCount}` }}
@@ -220,8 +318,22 @@ defineExpose({ open, back, allPosts })
       </header>
 
       <ul v-if="visible.length" class="fn-cards">
-        <li v-for="post in visible" :key="post.slug" class="fn-card" @click="open(post)">
-          <h3 class="fn-card-title">{{ post.title }}</h3>
+        <li v-for="post in visible" :key="post.slug" class="fn-card">
+          <h3 class="fn-card-title">
+            <!--
+              真 button，不是给 <li> 挂 @click：
+              <li> 不可聚焦也没有键盘事件，键盘/读屏用户根本打不开文章。
+              ::after 把命中区拉伸到整张卡，所以鼠标仍然点哪儿都能进。
+            -->
+            <button
+              type="button"
+              class="fn-card-btn"
+              :data-slug="post.slug"
+              @click="open(post)"
+            >
+              {{ post.title }}
+            </button>
+          </h3>
           <p class="fn-card-excerpt">{{ post.excerpt }}</p>
           <div class="fn-meta">
             <time v-if="post.date">{{ post.date }}</time>

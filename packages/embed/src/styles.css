@@ -151,12 +151,52 @@
 }
 
 .fn-card {
+  /* 拉伸按钮的定位参照，见 .fn-card-btn::after */
+  position: relative;
   padding: 18px 20px;
   background: var(--fn-surface);
   border: 1px solid var(--fn-border);
   border-radius: var(--fn-radius);
-  cursor: pointer;
   transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+/*
+ * 卡片标题里的是一个**真实 button**，而不是给 <li> 挂 @click。
+ *
+ * 原实现是 `<li @click>`：<li> 不可聚焦、没有键盘事件、也没有语义，
+ * 键盘用户和读屏用户根本点不开文章（Tab 走不到它，回车没反应）。
+ *
+ * 这里用「拉伸按钮」的写法同时保住两件事：
+ *   1. 语义与键盘可达 —— 真 button 在 <h3> 里，读屏会念「标题，三级，按钮」；
+ *   2. 整卡可点 —— ::after 覆盖整张卡片，鼠标点哪儿都算点这个按钮。
+ * 按钮本身只包标题文字，所以不存在「<p>/<h3> 塞进 button」这种非法嵌套。
+ */
+.fn-card-btn {
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.fn-card-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: var(--fn-radius);
+}
+
+.fn-card-btn:focus-visible {
+  outline: 2px solid var(--fn-accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+/* 键盘聚焦时，整卡的边框也跟着亮 —— 焦点在哪张卡上一眼能看出来 */
+.fn-card:has(.fn-card-btn:focus-visible) {
+  border-color: var(--fn-accent);
 }
 
 .fn-card:hover {
@@ -172,7 +212,8 @@
   color: var(--fn-text);
 }
 
-.fn-card:hover .fn-card-title {
+.fn-card:hover .fn-card-title,
+.fn-card-btn:focus-visible {
   color: var(--fn-accent);
 }
 
@@ -408,5 +449,50 @@
   .fn-content pre {
     font-size: 12.5px;
     padding: 13px 14px;
+  }
+}
+
+/* ============================ 无障碍 ============================ */
+
+/*
+ * 只给读屏用的文本（筛选结果播报等）。
+ * 不用 display:none / visibility:hidden —— 那会把内容从无障碍树里一并移除，
+ * 读屏就念不到了。clip-path 这套写法是「视觉隐藏但仍在无障碍树里」的标准做法。
+ */
+.fn-vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  border: 0;
+  clip-path: inset(50%);
+}
+
+/* 键盘焦点必须看得见：鼠标点击不触发 :focus-visible，所以不会有多余描边 */
+.fn-chip:focus-visible,
+.fn-back:focus-visible,
+.fn-more:focus-visible,
+.fn-search:focus-visible {
+  outline: 2px solid var(--fn-accent);
+  outline-offset: 2px;
+}
+
+/*
+ * 尊重系统的「减弱动态效果」设置。
+ * 组件默认有卡片上浮与平滑滚动，对前庭功能敏感的用户是负担。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .fn-root,
+  .fn-root * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .fn-card:hover {
+    transform: none;
   }
 }

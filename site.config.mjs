@@ -8,7 +8,7 @@
  *     见 docs/.vitepress/config.mjs 与 packages/embed/vite.config.js。
  *  3. 改造品牌只需改本文件，无需触碰任何页面或文章。
  *
- * 改名清单：name / nameZh / description / author / footer / nav
+ * 改名清单：name / nameZh / description / tagline / author / footer / nav / ui
  */
 
 /** 站点英文名常量，供对象内部自引用，避免同一品牌名在多处重复书写 */
@@ -107,11 +107,114 @@ export const site = {
     copyright: `Copyright © ${new Date().getFullYear()} ${SITE_NAME}`,
   },
 
+  // ==================== 内置 UI 文案本地化 ====================
+  /**
+   * VitePress 默认主题自带的英文 UI 文案。
+   *
+   * 站点是中文的，这些文案如果不换掉，访客会看到一半中文一半英文
+   * （搜索按钮、搜索弹窗、404 页、键盘「跳到正文」链接等）。
+   *
+   * ⚠️ 两种机制，别混：
+   *   - `search` / `notFound` / `skipToContent`：走 themeConfig 的官方开关，
+   *     由 docs/.vitepress/config.mjs 透传给 VitePress；
+   *   - `hardcodedAria`：主题里**写死的**字面量，`2.0.0-alpha.15` 没有任何
+   *     配置键能改它（实测 grep 确认）。只能用 scripts/localize-theme-aria.mjs
+   *     在构建完成后对产出的 HTML **与 theme JS** 做精确替换 —— 那个脚本
+   *     同样以本文件为数据源。
+   *
+   * ⚠️ 改这里的文案之前先读 README 踩坑 17：只改 HTML 不改 JS 会被 hydration
+   * 覆盖回英文；而给 JS 侧手写引号又会把字符串退化成裸标识符。
+   */
+  ui: {
+    /** 键盘用户按 Tab 时第一个聚焦到的「跳到正文」链接 */
+    skipToContent: '跳到正文',
+
+    /**
+     * 主题里写死、无配置键可改的 aria 文案。
+     *
+     * 这三条是 `visually-hidden` 的，普通访客看不见，但读屏用户会听到 ——
+     * 不换的话，中文站点会读出 "Main Navigation" / "toggle section"。
+     * 键名对应 scripts/localize-theme-aria.mjs 里的替换表；值写**裸文案**，
+     * 引号由脚本按 HTML / JS 两种上下文各自补。
+     */
+    hardcodedAria: {
+      /** VPNavBarMenu.vue：<nav aria-labelledby> 指向的隐藏标题 */
+      mainNav: '主导航',
+      /** VPSidebar.vue：侧边栏 <nav> 的隐藏标题 */
+      sidebarNav: '侧边栏导航',
+      /** VPSidebarItem.vue：可折叠分组的 caret 按钮 aria-label */
+      toggleSection: '展开或收起分组',
+    },
+
+    /**
+     * 本地搜索（minisearch）的按钮与弹窗文案。
+     *
+     * ⚠️ 结构是**两层**的，不能拍平：VitePress 用 `createSearchTranslate` 按
+     * `button.buttonText` / `modal.footer.selectText` 这样的路径逐层下钻，
+     * 结构不对它不会报错，只是**静默回落到英文默认值**。
+     * 这个形状抄自官方示例：
+     * https://vitepress.dev/reference/default-theme-search#i18n
+     *
+     * 键名则是逐一对照 alpha.15 的 VPLocalSearchBox.vue 源码取的 ——
+     * 下面这些是它真正读的键，多写无用，少写或写错会回落成英文。
+     * 另外注意 buttonText 同时用作按钮文字与输入框 placeholder（VitePress 的行为），
+     * 所以要短。
+     */
+    search: {
+      button: {
+        buttonText: '搜索',
+        buttonAriaLabel: '搜索',
+      },
+      modal: {
+        displayDetails: '显示详细列表',
+        resetButtonTitle: '重置搜索',
+        backButtonTitle: '关闭搜索',
+        noResultsText: '没有结果',
+        footer: {
+          selectText: '选择',
+          selectKeyAriaLabel: '回车',
+          navigateText: '切换',
+          navigateUpKeyAriaLabel: '上箭头',
+          navigateDownKeyAriaLabel: '下箭头',
+          closeText: '关闭',
+          closeKeyAriaLabel: 'Esc',
+        },
+      },
+    },
+
+    /**
+     * 404 页文案。
+     *
+     * VitePress 会在**没有** docs/404.md 时自动生成 404.html（Cloudflare Pages
+     * 只在产物根目录存在 404.html 时才返真 404，否则按 SPA 兜底把未知路径
+     * 全给 index.html 并返回 200 —— 那是软 404，SEO 上更糟）。
+     * 所以这里**不建** 404.md，只用官方给的主题开关换掉文案，
+     * 既保留自动生成的行为，又不会在仓库里多一个需要同步维护的页面。
+     */
+    notFound: {
+      code: '404',
+      title: '页面不存在',
+      quote: '这个地址下没有内容。可能是链接过期了，也可能文章换了位置 —— 回首页或从博客列表找找。',
+      linkLabel: '回到首页',
+      linkText: '回到首页',
+    },
+  },
+
   // ==================== 功能开关 ====================
   features: {
     /** 本地全文搜索 */
     search: true,
-    /** 每页「最后更新于」 */
+    /**
+     * 每页「最后更新于」。
+     *
+     * ⚠️ 日期取值是文章 front matter 的 `date`，**不是 git 提交时间** ——
+     * 见 docs/.vitepress/config.mjs 的 buildPostDateIndex()。
+     * 用 git 时间戳时，Cloudflare Pages 的浅克隆会让全站日期都变成「这次部署的时间」
+     * （实测：线上 sitemap 20 条 lastmod 完全相同），详见 README 踩坑 15。
+     *
+     * 这个开关仍然依赖 .git 的存在：VitePress 只要看到 themeConfig.lastUpdated
+     * 就会在内部调用 git，没有 .git 时会直接构建失败，所以本文件会在无 git 时整体关掉它。
+     */
     lastUpdated: true,
     /** 文章侧边栏 */
     sidebar: true,
