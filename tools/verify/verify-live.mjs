@@ -28,6 +28,14 @@ const ROOT = path.resolve(import.meta.dirname, '../..')
 const BASE = (process.env.BASE || 'https://forge-notes.pages.dev').replace(/\/$/, '')
 const ARTICLE = process.env.ARTICLE || '/posts/adsense-application-complete-guide'
 // 给了 OLD_THEME 就先轮询等新构建上线（hash 变了才继续），不给自己就立刻开验。
+//
+// ⚠️ 这个门槛比看起来**弱**，别把它当证据：
+//   产物本身**不可复现** —— VitePress 的本地搜索索引文档顺序不稳定（实测两次构建
+//   从不同的页面开始，doc 数都是 492），于是索引 chunk 名变 → 引用它的
+//   VPLocalSearchBox chunk 名变 → theme.*.js 的哈希跟着变。
+//   也就是说**任何一次重建都会改哈希，哪怕站点内容一个字节没变**。
+//   所以 OLD_THEME 只能回答「发生了一次重建」，回答不了「我的改动上线了」。
+//   真正证明改动生效的是下面那些 **marker 断言**（中文该在、英文该没）。
 const OLD_THEME = process.env.OLD_THEME || ''
 const PORT_CDP = Number(process.env.PORT_CDP || 9444)
 const SHOT_DIR = path.join(ROOT, '.verify')
