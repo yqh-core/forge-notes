@@ -153,10 +153,29 @@ if VITE_SITE_URL=https://example.com build_site p4-canonical; then
   printf '        canonical: home=%s about=%s post=%s\n' "$C_HOME" "$C_ABOUT" "$C_POST"
 
   if [ "$C_HOME" = "https://example.com/" ]; then ok "首页 canonical 指向站点根"; else bad "首页 canonical 异常: $C_HOME"; fi
-  if [ "$C_ABOUT" = "https://example.com/about.html" ]; then ok "关于页 canonical 带 .html 后缀"; else bad "关于页 canonical 异常: $C_ABOUT"; fi
+  # canonical 必须无 .html 后缀。Cloudflare Pages 会把 /about.html 308 到 /about，
+  # canonical 若带后缀，等于告诉搜索引擎「正确地址是会跳转的那个」，与 sitemap 也自相矛盾。
+  if [ "$C_ABOUT" = "https://example.com/about" ]; then ok "关于页 canonical 无 .html 后缀（与 Pages 实际 200 的地址一致）"; else bad "关于页 canonical 异常: $C_ABOUT"; fi
 
   if sitemap_has "$C_ABOUT"; then ok "关于页 canonical 与 sitemap 一致"; else bad "关于页 canonical 不在 sitemap 中（$C_ABOUT）"; fi
   if sitemap_has "$C_POST"; then ok "文章页 canonical 与 sitemap 一致"; else bad "文章页 canonical 不在 sitemap 中（$C_POST）"; fi
+
+  # cleanUrls 生效的直接证据：产物 HTML 里一个 .html 站内链接都不该有，
+  # 否则每次点击都要在 Pages 上多走一次 308。
+  HTML_LINKS="$(grep -ohE 'href="/[^"]*\.html"' "$DIST"/*.html "$DIST"/posts/*.html 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$HTML_LINKS" = "0" ]; then
+    ok "产物内无 .html 站内链接（不会触发 Pages 的 308 重定向）"
+  else
+    bad "仍有 $HTML_LINKS 个 .html 站内链接"
+    grep -ohE 'href="/[^"]*\.html"' "$DIST"/*.html "$DIST"/posts/*.html 2>/dev/null | head -3
+  fi
+
+  # robots.txt 由 buildEnd 从配置源派生 —— 域名不该在静态文件里再写一遍
+  if [ -f "$DIST/robots.txt" ] && grep -q "Sitemap: https://example.com/sitemap.xml" "$DIST/robots.txt"; then
+    ok "robots.txt 由配置源生成，并声明了 sitemap 地址"
+  else
+    bad "robots.txt 缺失或未声明 sitemap"
+  fi
 else
   bad "带域名构建失败，见 $LOG"
 fi

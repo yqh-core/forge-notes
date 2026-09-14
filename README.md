@@ -75,7 +75,7 @@ export const site = {
   tagline: '...',             // 首页标语（供扩展使用）
   lang: 'zh-CN',              // <html lang>
   base: '/',                  // 部署路径（推荐用 VITE_BASE 覆盖，不改这里）
-  url: '',                    // 站点域名（配置后才会生成 sitemap 与 canonical）
+  url: 'https://forge-notes.pages.dev',  // 站点域名（留空则不生成 sitemap 与 canonical）
   author: { name: 'yqh', github: 'yqh-core', email: '' },
   logo: '/logo.svg',          // 导航栏图标（base 前缀由 VitePress 自动补，勿手动加）
   nav: [...],                 // 导航栏
@@ -88,7 +88,7 @@ export const site = {
     search: true,
     lastUpdated: true,        // 依赖 .git；无 git 时自动关闭并打印告警
     sidebar: true,
-    cleanUrls: false,         // 生成不带 .html 的干净链接（需服务端配合）
+    cleanUrls: true,          // 生成不带 .html 的干净链接（Cloudflare Pages 必须开，原因见踩坑 12）
     editLinkRepo: '',         // 留空即关闭「编辑此页」，避免 your-repo 死链
   },
   content: {                  // 内容源 + 列表页自动分组规则
@@ -304,7 +304,34 @@ server {
 |---|---|
 | 构建命令 | `npm run build:site` |
 | 输出目录 | `docs/.vitepress/dist` |
-| Node 版本 | `22` |
+| Node 版本 | 由仓库根的 `.nvmrc` 指定（`22.22.2`），平台会自动读取 |
+
+Cloudflare Pages 的实际配置（Git 集成，push 即部署）：
+
+| 字段 | 值 |
+|---|---|
+| 入口 | `Create application` → **Pages** 标签 → `Connect to Git` |
+| Framework preset | `None` |
+| Build command | `npm run build:site` |
+| Build output directory | `docs/.vitepress/dist` |
+| Root directory | 留空 |
+| 环境变量 | 不需要（域名写在 `site.config.mjs` 的 `url`） |
+
+三条不能踩的：
+
+- **入口必须是 Pages，不是 Workers。** Workers 流程没有「Build output directory」字段，
+  域名会变成 `*.workers.dev`，而且仓库里没有 wrangler 配置文件时它不会部署，
+  只会给仓库开一个 PR。
+- **不要加 `wrangler.toml`。** 文件里一旦出现 `pages_build_output_dir`，
+  它就成为配置的唯一来源，仪表盘上的构建命令字段会变成只读。
+- **不要再挂一条 GitHub Actions 做部署。** 两条链路写同一个生产环境会互相覆盖，
+  两边日志都是绿的，线上到底是谁的产物就说不清了。
+
+在推上线之前，本地可以先跑一遍等价复现（含干净克隆 + 与 CI 相同的安装与构建命令）：
+
+```bash
+bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
+```
 
 ## 已知取舍与限制
 
@@ -356,7 +383,9 @@ server {
 8. **canonical 必须与 sitemap 用同一套 URL 形态。**
    初版 canonical 生成 `/about`，而 VitePress 自带的 sitemap 写的是 `/about.html`
    （因为 `cleanUrls` 默认关闭）。不一致会被搜索引擎当成两个页面。
-   现已按官方示例补上 `.html`，并在 `tools/verify/verify-config.sh` 里加了断言把这个一致性钉住。
+   现已在 `site.config.mjs` 里开启 `cleanUrls: true`，两边统一为无后缀的 `/about`，
+   并在 `tools/verify/verify-config.sh` 里加了断言把这个一致性钉住。
+   （为什么最后选「无后缀」而不是「带 .html」——见踩坑 14。）
 
 9. **AdSense 脚本默认不注入是刻意的。** 只有显式传 `VITE_ADSENSE_CLIENT` 才会注入。
    这样把博客嵌进别人站点时，不会把本站广告代码带过去 —— 属于「默认安全」的设计，
@@ -405,6 +434,31 @@ server {
     现改用 `.fn-post-list li a` 精确取列表页自己的条目，并断言**恰好等于** 17。
     *写断言时要问一句：这条有没有可能无论如何都通过？*
 
+14. **Cloudflare Pages 会把 `*.html` 统一 308 掉 —— 于是「带 .html 的站内链接」全部变成重定向。**
+   Pages 的 HTML URL 规范化行为，实测（2026-09-14，线上真实响应）：
+
+   | 请求 | 响应 |
+   |---|---|
+   | `GET /about.html` | `308 Permanent Redirect` → `Location: /about` |
+   | `GET /posts/welcome.html` | `308 Permanent Redirect` → `Location: /posts/welcome` |
+   | `GET /posts` | `308 Permanent Redirect` → `Location: /posts/` |
+   | `GET /about`、`GET /posts/welcome` | `200` |
+
+   原配置 `cleanUrls: false`，VitePress 于是把**每一个**站内链接都渲染成
+   `/posts/xxx.html`（首页 6 个、列表页 19 个、侧边栏 18 个），
+   再加上 canonical 与 sitemap 也全是 `.html` —— 结果是：每次点击多一次 308 往返，
+   搜索引擎拿到的则是「canonical 指向一个会跳转的地址」这种自相矛盾的信号，
+   Search Console 会把整站 19 条 URL 报成 *Page with redirect*。
+   对一个以 SEO 与 AdSense 过审为目标的站点，这属于要修的问题，不是可忽略的细节。
+
+   修法是把 `cleanUrls` 打开，让产出的链接形态与 Pages 实际返回 200 的地址一致。
+   VitePress 会把 markdown 里的 `/foo.html` 链接、`createContentLoader` 返回的
+   `url`、canonical、sitemap 全部统一改写成无后缀形式，产物里一个 `.html` 站内链接都不剩
+   （已固化为 `verify-config.sh` 的断言）。
+
+   *教训：部署平台的 URL 规范化行为要用真实响应码验一遍。只跑本地 `vitepress preview`
+   永远看不到 308 —— 本地预览服务器不吃 `.html` 那一套。*
+
 ## 关键命令速查
 
 ```bash
@@ -422,11 +476,17 @@ VITE_ADSENSE_CLIENT=ca-pub-xxx npm run build:site            # 启用 AdSense
 VITE_OUT_DIR=build/site npm run build:site                   # 指定输出目录（多套产物并存）
 # 注意：不要用 VITE_BASE=./ —— 本站有 posts/ 子目录，会让深层页面资源全部 404，见上文说明
 
-# 验证（三层，都是可重复运行的脚本）
+# 验证（四层，都是可重复运行的脚本）
 ROUNDS=3 node tools/verify/verify.js           # ① 浏览器端到端：需先 npm run build:site + build:embed
 bash tools/verify/verify-config.sh             # ② 架构与配置一致性：自己会重建，结束自动还原
 node tools/verify/verify-deploy-modes.mjs      # ③ 部署形态：自己构建两种 base 并用浏览器取证
+bash tools/verify/cleanroom.sh ci https://forge-notes.pages.dev
+                                               # ④ 干净克隆复现 CI：等价于 Cloudflare 检出后的状态
 ```
+
+> **构建产物里还会多出两个文件**，都不是手写进仓库的，而是构建期生成的：
+> `sitemap.xml`（配了域名才有）与 `robots.txt`（由 `config.mjs` 的 `buildEnd` 从
+> `site.config.mjs` 的 `url` 派生，顺带声明 `Sitemap:` 地址）。
 
 ## 技术栈
 

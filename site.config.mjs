@@ -38,8 +38,12 @@ export const site = {
   /**
    * 站点完整域名，用于 sitemap 与 canonical 链接。
    * 通过环境变量覆盖：VITE_SITE_URL=https://your-domain.com
+   *
+   * 留空则**不生成** sitemap 与 canonical（避免产出 hostname 为空的无效文件）。
+   * 当前值取自 Cloudflare Pages 的项目子域名 —— 实测该域名未被他人占用，
+   * 所以没有随机后缀（Pages 的子域名冲突时会加后缀，届时改这里即可）。
    */
-  url: '',
+  url: 'https://forge-notes.pages.dev',
 
   // ==================== 作者信息 ====================
   author: {
@@ -113,10 +117,22 @@ export const site = {
     sidebar: true,
     /**
      * 是否生成不带 .html 后缀的干净链接。
-     * 开启需服务端配合（Nginx: try_files $uri $uri/ $uri.html）。
-     * 关闭时页面 URL 形如 /about.html，canonical 与 sitemap 均按此生成。
+     *
+     * ⚠️ 本站部署在 Cloudflare Pages，必须为 true。实测（2026-09-14）：
+     *     GET /about.html        -> 308 Permanent Redirect, Location: /about
+     *     GET /posts/welcome.html-> 308 Permanent Redirect, Location: /posts/welcome
+     *     GET /about             -> 200
+     *     GET /posts/welcome     -> 200
+     *   Pages 会把 *.html 统一 308 到去后缀的地址。若这里保持 false，
+     *   VitePress 产出的**每一个**站内链接、canonical、sitemap 条目都指向一个会跳转的
+     *   地址 —— 每次点击多一次往返，搜索引擎拿到的是「canonical 指向重定向」这种
+     *   自相矛盾的信号。开启后三者与 Pages 实际返回 200 的地址完全一致。
+     *
+     * 开启的代价：服务端要能把 /about 映射到 about.html。
+     *   - Cloudflare Pages / Netlify / Vercel：原生支持，无需配置
+     *   - Nginx：try_files $uri $uri/ $uri.html（README 里有完整片段）
      */
-    cleanUrls: false,
+    cleanUrls: true,
     /**
      * 「在 GitHub 上编辑此页」。
      * 留空字符串即关闭该功能（避免出现 your-repo 这类无效占位链接）。

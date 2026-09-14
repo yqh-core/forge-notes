@@ -206,4 +206,30 @@ export default defineConfig({
 
   // 配置了域名才生成 sitemap，避免产出含空 hostname 的无效文件
   ...(siteUrl && { sitemap: { hostname: siteUrl } }),
+
+  /**
+   * 构建收尾时补一个 robots.txt。
+   *
+   * 为什么不放在 docs/public/robots.txt：那是静态文件，域名得在仓库里再手写一遍，
+   * 一旦换域名或改用 VITE_SITE_URL 覆盖，两处就会不一致 —— 而「域名只写一处」
+   * 正是这个项目的核心约束。buildEnd 里从 siteUrl 派生，天然不会漂。
+   *
+   * 顺带说明：Cloudflare 对没有 robots.txt 的站点会自动注入一份（带 content signals
+   * 条款的）托管版本。我们主动提供自己的，一是为了声明 Sitemap，二是把
+   * 「允许哪些爬虫」这个决定权拿回自己手里，而不是默认接受别人的策略。
+   */
+  async buildEnd(siteConfig) {
+    const lines = [
+      '# robots.txt 由 docs/.vitepress/config.mjs 依据 site.config.mjs 的 url 生成',
+      '# 想自定义策略请改这里，不要新建 docs/public/robots.txt（会造成域名两处维护）',
+      'User-agent: *',
+      'Allow: /',
+    ]
+    if (siteUrl) lines.push('', `Sitemap: ${siteUrl}/sitemap.xml`)
+    await fs.promises.writeFile(
+      path.join(siteConfig.outDir, 'robots.txt'),
+      lines.join('\n') + '\n',
+      'utf8',
+    )
+  },
 })
